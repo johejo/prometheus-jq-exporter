@@ -400,7 +400,7 @@ func loadConfig(config string, expandEnv bool) (*Config, error) {
 	switch filepath.Ext(config) {
 	case ".json":
 		unmarshal = json.Unmarshal
-	case ".yaml", "yml":
+	case ".yaml", ".yml":
 		unmarshal = yaml.Unmarshal
 	default:
 		return nil, fmt.Errorf("unsupported file %s", config)
