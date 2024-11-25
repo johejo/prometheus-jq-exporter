@@ -1,0 +1,45 @@
+{
+  "Version": "1.76.6",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "Health": [],
+  "Peer": {
+    "nodekey:testnodekey": {
+      "DNSName": "testhostname.tailc2865.ts.net.",
+      "OS": "macOS",
+      "TailscaleIPs": [
+        "100.12.34.56",
+        "fd7a:115c:a1e0::ac99:b03d"
+      ],
+      "Relay": "tok",
+      "RxBytes": 168365416,
+      "TxBytes": 363769796,
+      "Created": "2122-01-14T13:30:18.170320276Z",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": true,
+      "KeyExpiry": "2125-01-08T02:03:11Z"
+    },
+    "nodekey:testnodekey2": {
+      "HostName": "localhost",
+      "DNSName": "testhostname2.tailc2865.ts.net.",
+      "OS": "android",
+      "TailscaleIPs": [
+        "100.123.4.56",
+        "fd7a:115c:a1e0::ac01:b66c"
+      ],
+      "Relay": "tok",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "Created": "2124-06-14T14:17:04.079089567Z",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": false,
+      "KeyExpiry": "2124-12-11T14:17:04Z"
+    }
+  }
+}

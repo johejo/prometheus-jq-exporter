@@ -1,0 +1,32 @@
+modules:
+  tailscale:
+    headers:
+      Host: local-tailscaled.sock
+    metrics:
+      - name: tailscale_status_peer
+        query: '[.Peer | to_entries[].value]'
+        labels:
+          dns_name: '.DNSName'
+          os: '.OS'
+          ipv4: '.TailscaleIPs[0]'
+          ipv6: '.TailscaleIPs[1]'
+          relay: '.Relay'
+          exit_node: '.ExitNode'
+          exit_node_option: '.ExitNodeOption'
+          created: '.Created'
+          machine_name: '.DNSName | split(".")[0]'
+          key_expiry: '.KeyExpiry'
+        valueType: gauge
+        value: 1
+      - name: tailscale_status_peer_rx_bytes
+        query: '[.Peer | to_entries[].value]'
+        valueType: gauge
+        value: '.RxBytes'
+        labels:
+          machine_name: '.DNSName | split(".")[0]'
+      - name: tailscale_status_peer_tx_bytes
+        query: '[.Peer | to_entries[].value]'
+        valueType: gauge
+        value: '.TxBytes'
+        labels:
+          machine_name: '.DNSName | split(".")[0]'
