@@ -226,20 +226,6 @@ func asLabelValue(value any) string {
 	return labelValue
 }
 
-func readLocalJSONFile(name string) (any, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var bodyJSON any
-	if err := json.NewDecoder(f).Decode(&bodyJSON); err != nil {
-		return nil, err
-	}
-	return bodyJSON, nil
-}
-
 func doHTTP(ctx context.Context, method string, target string, headers map[string]string, body io.Reader) (any, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
