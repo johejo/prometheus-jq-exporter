@@ -254,9 +254,14 @@ func doHTTP(ctx context.Context, method string, target string, headers map[strin
 	}
 	defer resp.Body.Close()
 
-	var respBodyJSON any
-	if err := json.NewDecoder(resp.Body).Decode(&respBodyJSON); err != nil {
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return nil, err
+	}
+
+	var respBodyJSON any
+	if err := json.Unmarshal(b, &respBodyJSON); err != nil {
+		return nil, fmt.Errorf("%s: %w", string(b), err)
 	}
 	return respBodyJSON, nil
 }
