@@ -101,28 +101,7 @@ func initHTTPClient() *http.Client {
 
 	var transport http.RoundTripper
 	if *enableUnixSocketTransport {
-		transport = RoundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if strings.Contains(r.URL.Path, ".sock") {
-				parts := strings.Split(r.URL.Path, "/")
-				for i, part := range parts {
-					if i != len(parts)-1 && strings.HasSuffix(part, ".sock") {
-						r.URL.Path = "/" + path.Join(parts[i+1:]...)
-						if r.URL.Host == "" {
-							if host := r.Header.Get("Host"); host != "" {
-								r.URL.Host = host
-							}
-						}
-						unixTransport := defaultTransport.Clone()
-						socketPath := strings.Join(parts[0:i+1], "/")
-						unixTransport.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
-							return net.Dial("unix", socketPath)
-						}
-						return unixTransport.RoundTrip(r)
-					}
-				}
-			}
-			return defaultTransport.RoundTrip(r)
-		})
+		transport = transportWithUnixSupport(defaultTransport)
 	} else {
 		transport = defaultTransport
 	}
@@ -130,6 +109,31 @@ func initHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: gzhttp.Transport(transport),
 	}
+}
+
+func transportWithUnixSupport(transport *http.Transport) http.RoundTripper {
+	return RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, ".sock") {
+			parts := strings.Split(r.URL.Path, "/")
+			for i, part := range parts {
+				if i != len(parts)-1 && strings.HasSuffix(part, ".sock") {
+					r.URL.Path = "/" + path.Join(parts[i+1:]...)
+					if r.URL.Host == "" {
+						if host := r.Header.Get("Host"); host != "" {
+							r.URL.Host = host
+						}
+					}
+					unixTransport := transport.Clone()
+					socketPath := strings.Join(parts[0:i+1], "/")
+					unixTransport.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
+						return net.Dial("unix", socketPath)
+					}
+					return unixTransport.RoundTrip(r)
+				}
+			}
+		}
+		return transport.RoundTrip(r)
+	})
 }
 
 func initLogger(loglevel string) {
