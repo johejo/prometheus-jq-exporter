@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/goccy/go-yaml"
@@ -242,10 +241,13 @@ func asLabelValue(value any) string {
 	return labelValue
 }
 
-func doHTTP(ctx context.Context, method string, target string, headers map[string]string, body io.Reader, validStatusCodes []int) (any, error) {
+func doHTTP(ctx context.Context, method string, target string, headers map[string]string, body io.Reader, bodyContentType string, validStatusCodes []int) (any, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
+	}
+	if bodyContentType != "" {
+		req.Header.Set("Content-Type", bodyContentType)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -276,19 +278,65 @@ func doHTTP(ctx context.Context, method string, target string, headers map[strin
 	return respBodyJSON, nil
 }
 
-func makeBodyFromTemplate(data any, tmplString string) (io.Reader, error) {
-	if tmplString == "" {
-		return nil, nil
+func makeBody(ctx context.Context, params map[string][]string, body Body) (io.Reader, string, error) {
+	if body.query == nil {
+		return nil, "", nil
 	}
-	tmpl, err := template.New("").Parse(tmplString)
+	input := make(map[string]any, len(params))
+	for key, values := range params {
+		items := make([]any, len(values))
+		for i, value := range values {
+			items[i] = value
+		}
+		input[key] = items
+	}
+	value, err := jqOne(ctx, *body.query, input)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	buf := new(bytes.Buffer)
-	if err := tmpl.Execute(buf, data); err != nil {
-		return nil, err
+	switch body.format {
+	case bodyFormatJSON:
+		content, err := json.Marshal(value)
+		if err != nil {
+			return nil, "", err
+		}
+		return bytes.NewReader(content), "application/json", nil
+	case bodyFormatText:
+		content, ok := value.(string)
+		if !ok {
+			return nil, "", fmt.Errorf("body.text must produce a string, got %T", value)
+		}
+		return strings.NewReader(content), "text/plain; charset=utf-8", nil
+	default:
+		return nil, "", fmt.Errorf("unsupported body format %q", body.format)
 	}
-	return buf, nil
+}
+
+func jqOne(ctx context.Context, query compiledQuery, value any) (any, error) {
+	iter := query.code.RunWithContext(ctx, value)
+	var result any
+	count := 0
+	for {
+		value, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if err, ok := value.(error); ok {
+			if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
+				break
+			}
+			return nil, err
+		}
+		count++
+		if count > 1 {
+			return nil, fmt.Errorf("body query produced multiple values")
+		}
+		result = value
+	}
+	if count == 0 {
+		return nil, fmt.Errorf("body query produced no value")
+	}
+	return result, nil
 }
 
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -326,14 +374,14 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 
 		slog.Debug("start probe", "module", module, "method", method, "target", target)
 
-		body, err := makeBodyFromTemplate(q, mod.Body.Content)
+		body, bodyContentType, err := makeBody(ctx, q, mod.Body)
 		if err != nil {
 			slog.Error(err.Error())
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 		var bodyJSON any
-		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body, mod.ValidStatusCodes)
+		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body, bodyContentType, mod.ValidStatusCodes)
 		if err != nil {
 			slog.Error(err.Error())
 			http.Error(w, "Failed to fetch JSON response. TARGET: "+target+", ERROR: "+err.Error(), http.StatusServiceUnavailable)
@@ -614,6 +662,11 @@ func (c queryCompiler) compile(source Query, literalFallback bool) (compiledQuer
 func compileConfig(cfg *Config) error {
 	compiler := make(queryCompiler)
 	for moduleName, module := range cfg.Modules {
+		compiledBody, err := compileBody(compiler, module.Body)
+		if err != nil {
+			return fmt.Errorf("module %q body: %w", moduleName, err)
+		}
+		module.Body = compiledBody
 		for metricIndex, metric := range module.Metrics {
 			compiledMetric, err := compileMetric(compiler, metric)
 			if err != nil {
@@ -624,6 +677,33 @@ func compileConfig(cfg *Config) error {
 		cfg.Modules[moduleName] = module
 	}
 	return nil
+}
+
+func compileBody(compiler queryCompiler, body Body) (Body, error) {
+	if body.JSON != nil && body.Text != nil {
+		return Body{}, fmt.Errorf("json and text are mutually exclusive")
+	}
+	compiled := body
+	var source *Query
+	switch {
+	case body.JSON != nil:
+		compiled.format = bodyFormatJSON
+		source = body.JSON
+	case body.Text != nil:
+		compiled.format = bodyFormatText
+		source = body.Text
+	default:
+		return compiled, nil
+	}
+	if *source == "" {
+		return Body{}, fmt.Errorf("%s query is empty", compiled.format)
+	}
+	query, err := compiler.compile(*source, false)
+	if err != nil {
+		return Body{}, fmt.Errorf("%s: %w", compiled.format, err)
+	}
+	compiled.query = &query
+	return compiled, nil
 }
 
 func compileMetric(compiler queryCompiler, metric Metric) (Metric, error) {
@@ -689,8 +769,18 @@ type Metric struct {
 
 type Query = string
 
+type bodyFormat string
+
+const (
+	bodyFormatJSON bodyFormat = "json"
+	bodyFormatText bodyFormat = "text"
+)
+
 type Body struct {
-	Content string `yaml:"content"`
+	JSON   *Query `json:"json,omitempty" yaml:"json,omitempty"`
+	Text   *Query `json:"text,omitempty" yaml:"text,omitempty"`
+	format bodyFormat
+	query  *compiledQuery
 }
 
 type RoundTripFunc func(*http.Request) (*http.Response, error)

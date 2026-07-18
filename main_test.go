@@ -249,9 +249,9 @@ func TestProbeErrorStatus(t *testing.T) {
 			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
 			want:   http.StatusServiceUnavailable,
 		},
-		"invalid body template": {
+		"body query evaluation failure": {
 			cfg: &Config{Modules: map[string]Module{"test": {
-				Body: Body{Content: "{{"},
+				Body: Body{JSON: queryPointer(`error("failed")`)},
 			}}},
 			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
 			want:   http.StatusInternalServerError,
@@ -276,6 +276,96 @@ func TestProbeErrorStatus(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg)))
 			assert(t, test.want, result.StatusCode)
+		})
+	}
+}
+
+func TestProbeBody(t *testing.T) {
+	tests := map[string]struct {
+		body            Body
+		headers         map[string]string
+		wantBody        string
+		wantContentType string
+	}{
+		"none": {},
+		"json": {
+			body: Body{JSON: queryPointer(`{
+  name: .name[0],
+  tags: .tag,
+  values: [1, true, null]
+}`)},
+			wantBody:        `{"name":"quote\"line\nbreak","tags":["a","b"],"values":[1,true,null]}`,
+			wantContentType: "application/json",
+		},
+		"text": {
+			body:            Body{Text: queryPointer(`"name=\(.name[0]);tags=\(.tag | join(","))"`)},
+			wantBody:        "name=quote\"line\nbreak;tags=a,b",
+			wantContentType: "text/plain; charset=utf-8",
+		},
+		"empty text": {
+			body:            Body{Text: queryPointer(`""`)},
+			wantContentType: "text/plain; charset=utf-8",
+		},
+		"content type override": {
+			body:            Body{Text: queryPointer(`"name=\(.name[0])"`)},
+			headers:         map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+			wantBody:        "name=quote\"line\nbreak",
+			wantContentType: "application/x-www-form-urlencoded",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			var gotBody, gotContentType string
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody = string(must[[]byte](t)(io.ReadAll(r.Body)))
+				gotContentType = r.Header.Get("Content-Type")
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			t.Cleanup(target.Close)
+
+			cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{
+				"test": {Body: test.body, Headers: test.headers},
+			}})
+			params := url.Values{
+				"module": {"test"},
+				"target": {target.URL},
+				"method": {http.MethodPost},
+				"name":   {"quote\"line\nbreak"},
+				"tag":    {"a", "b"},
+			}
+			result := testReq(http.MethodGet, "/probe?"+params.Encode(), nil, handleProbe(cfg))
+			assert(t, http.StatusOK, result.StatusCode)
+			assert(t, test.wantBody, gotBody)
+			assert(t, test.wantContentType, gotContentType)
+		})
+	}
+}
+
+func TestProbeRejectsInvalidBodyResults(t *testing.T) {
+	tests := map[string]Body{
+		"evaluation error": {JSON: queryPointer(`error("failed")`)},
+		"no values":        {JSON: queryPointer(`empty`)},
+		"multiple values":  {JSON: queryPointer(`1, 2`)},
+		"non-string text":  {Text: queryPointer(`1`)},
+	}
+
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			targetCalled := false
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				targetCalled = true
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			t.Cleanup(target.Close)
+
+			cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {Body: body}}})
+			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
+			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+			assert(t, http.StatusInternalServerError, result.StatusCode)
+			if targetCalled {
+				t.Fatal("target was called after body evaluation failed")
+			}
 		})
 	}
 }
@@ -459,9 +549,35 @@ func TestLoadConfigEpochTimestamp(t *testing.T) {
 	}
 }
 
+func TestLoadConfigBody(t *testing.T) {
+	tests := map[string]string{
+		"yaml": "modules:\n  test:\n    body:\n      json: '{value: .value[0]}'\n",
+		"json": `{"modules":{"test":{"body":{"text":"\"value=\\(.value[0])\""}}}}`,
+	}
+
+	for extension, content := range tests {
+		t.Run(extension, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config."+extension)
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			body := must[*Config](t)(loadConfig(configPath, false)).Modules["test"].Body
+			if body.query == nil {
+				t.Fatal("body query was not compiled")
+			}
+			wantFormat := bodyFormatJSON
+			if extension == "json" {
+				wantFormat = bodyFormatText
+			}
+			assert(t, wantFormat, body.format)
+		})
+	}
+}
+
 func TestCompileConfigCompilesAndReusesQueries(t *testing.T) {
 	cfg := &Config{Modules: map[string]Module{
 		"test": {
+			Body: Body{JSON: queryPointer(".value")},
 			Metrics: []Metric{{
 				Query:          ".value",
 				Name:           ".value",
@@ -476,6 +592,7 @@ func TestCompileConfigCompilesAndReusesQueries(t *testing.T) {
 	compiled := mustCompileConfig(t, cfg).Modules["test"].Metrics[0]
 	wantCode := compiled.query.code
 	for field, gotCode := range map[string]*gojq.Code{
+		"body":           cfg.Modules["test"].Body.query.code,
 		"name":           compiled.name.code,
 		"label":          compiled.labels["value"].code,
 		"value":          compiled.value.code,
@@ -484,6 +601,48 @@ func TestCompileConfigCompilesAndReusesQueries(t *testing.T) {
 		if gotCode != wantCode {
 			t.Errorf("%s did not reuse the compiled query", field)
 		}
+	}
+}
+
+func TestCompileConfigRejectsInvalidBodies(t *testing.T) {
+	tests := map[string]struct {
+		body Body
+		part string
+	}{
+		"json and text": {
+			body: Body{JSON: queryPointer("."), Text: queryPointer(".")},
+			part: "mutually exclusive",
+		},
+		"empty json": {
+			body: Body{JSON: queryPointer("")},
+			part: "json query is empty",
+		},
+		"empty text": {
+			body: Body{Text: queryPointer("")},
+			part: "text query is empty",
+		},
+		"json parse error": {
+			body: Body{JSON: queryPointer("(")},
+			part: "json",
+		},
+		"text compile error": {
+			body: Body{Text: queryPointer("unknown_function")},
+			part: "text",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := compileConfig(&Config{Modules: map[string]Module{"test": {Body: test.body}}})
+			if err == nil {
+				t.Fatal("expected body compilation error")
+			}
+			for _, part := range []string{`module "test"`, "body", test.part} {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q does not contain %q", err, part)
+				}
+			}
+		})
 	}
 }
 
@@ -786,6 +945,10 @@ func mustCompileConfig(t *testing.T, cfg *Config) *Config {
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+func queryPointer(query Query) *Query {
+	return &query
 }
 
 func mustCompileMetric(t *testing.T, metric Metric) Metric {

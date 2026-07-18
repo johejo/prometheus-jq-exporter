@@ -50,6 +50,38 @@ modules:
 
 When `valid_status_codes` is omitted or empty, only 2xx responses are accepted. When it is set, only the listed status codes are accepted, including non-2xx responses.
 
+### Request body
+
+Use `body.json` or `body.text` to build a request body with a jq expression. The expression receives all probe URL query parameters as an object whose values are always arrays of strings. For example, `?query=up&tag=a&tag=b` is available as `{"query":["up"],"tag":["a","b"]}`.
+
+`body.json` serializes the expression result as JSON:
+
+```yaml
+modules:
+  example:
+    body:
+      json: |
+        {
+          query: .query[0],
+          tags: .tag
+        }
+    # ...
+```
+
+`body.text` requires the expression to produce a string and sends that string without additional encoding:
+
+```yaml
+modules:
+  example:
+    body:
+      text: '"query=\(.query[0] | @uri)"'
+    headers:
+      Content-Type: application/x-www-form-urlencoded
+    # ...
+```
+
+Only one of `body.json` and `body.text` can be specified. Each expression must produce exactly one value. The default content types are `application/json` and `text/plain; charset=utf-8`, respectively; an explicit `Content-Type` in `headers` overrides the default.
+
 Each metric accepts `valueType: counter`, `valueType: gauge`, or `valueType: untyped`. When `valueType` is omitted, it defaults to `untyped`. Prefer `counter` or `gauge` when the source metric's semantics are known.
 
 Set `epochTimestamp` to a jq expression to use a value from each metric object as the sample timestamp. The value must be an integer Unix timestamp in milliseconds:
