@@ -239,7 +239,7 @@ func asLabelValue(value any) string {
 	return labelValue
 }
 
-func doHTTP(ctx context.Context, method string, target string, headers map[string]string, body io.Reader) (any, error) {
+func doHTTP(ctx context.Context, method string, target string, headers map[string]string, body io.Reader, validStatusCodes []int) (any, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
@@ -252,6 +252,14 @@ func doHTTP(ctx context.Context, method string, target string, headers map[strin
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if len(validStatusCodes) == 0 {
+		if resp.StatusCode/100 != 2 {
+			return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+		}
+	} else if !slices.Contains(validStatusCodes, resp.StatusCode) {
+		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+	}
 
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -322,7 +330,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			return
 		}
 		var bodyJSON any
-		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body)
+		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body, mod.ValidStatusCodes)
 		if err != nil {
 			slog.Error(err.Error())
 			http.Error(w, "Failed to fetch JSON response. TARGET: "+target+", ERROR: "+err.Error(), http.StatusServiceUnavailable)
@@ -431,9 +439,10 @@ type Config struct {
 }
 
 type Module struct {
-	Metrics []Metric          `json:"metrics" yaml:"metrics"`
-	Body    Body              `json:"body" yaml:"body"`
-	Headers map[string]string `json:"headers" yaml:"headers"`
+	Metrics          []Metric          `json:"metrics" yaml:"metrics"`
+	Body             Body              `json:"body" yaml:"body"`
+	Headers          map[string]string `json:"headers" yaml:"headers"`
+	ValidStatusCodes []int             `json:"valid_status_codes" yaml:"valid_status_codes"`
 }
 
 type Metric struct {

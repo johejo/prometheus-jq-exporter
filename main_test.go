@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -275,6 +276,75 @@ func TestProbeErrorStatus(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			result := testReq(http.MethodGet, test.target, nil, handleProbe(test.cfg))
 			assert(t, test.want, result.StatusCode)
+		})
+	}
+}
+
+func TestProbeValidStatusCodes(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status := must[int](t)(strconv.Atoi(r.URL.Query().Get("status")))
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(target.Close)
+
+	tests := map[string]struct {
+		status           int
+		validStatusCodes []int
+		want             int
+	}{
+		"default accepts 2xx": {
+			status: 299,
+			want:   http.StatusOK,
+		},
+		"empty list accepts 2xx": {
+			status:           http.StatusOK,
+			validStatusCodes: []int{},
+			want:             http.StatusOK,
+		},
+		"default rejects non-2xx": {
+			status: http.StatusNotFound,
+			want:   http.StatusServiceUnavailable,
+		},
+		"configured accepts non-2xx": {
+			status:           http.StatusNotFound,
+			validStatusCodes: []int{http.StatusNotFound},
+			want:             http.StatusOK,
+		},
+		"configured rejects unlisted 2xx": {
+			status:           http.StatusOK,
+			validStatusCodes: []int{http.StatusCreated},
+			want:             http.StatusServiceUnavailable,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{Modules: map[string]Module{
+				"test": {ValidStatusCodes: test.validStatusCodes},
+			}}
+			probeTarget := fmt.Sprintf("%s?status=%d", target.URL, test.status)
+			query := "/probe?module=test&target=" + url.QueryEscape(probeTarget)
+			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+			assert(t, test.want, result.StatusCode)
+		})
+	}
+}
+
+func TestLoadConfigValidStatusCodes(t *testing.T) {
+	tests := map[string]string{
+		"yaml": "modules:\n  test:\n    valid_status_codes: [200, 404]\n",
+		"json": `{"modules":{"test":{"valid_status_codes":[200,404]}}}`,
+	}
+
+	for extension, content := range tests {
+		t.Run(extension, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config."+extension)
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := must[*Config](t)(loadConfig(configPath, false))
+			assert(t, []int{http.StatusOK, http.StatusNotFound}, cfg.Modules["test"].ValidStatusCodes)
 		})
 	}
 }

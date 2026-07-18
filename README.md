@@ -38,6 +38,17 @@ Usage of prometheus-jq-exporter:
 
 ## Example
 
+Each module can restrict the HTTP response status codes accepted from the target:
+
+```yaml
+modules:
+  example:
+    valid_status_codes: [200, 404]
+    metrics:
+      # ...
+```
+
+When `valid_status_codes` is omitted or empty, only 2xx responses are accepted. When it is set, only the listed status codes are accepted, including non-2xx responses.
 
 ```
 $ prometheus-jq-exporter --config ./testdata/config.yaml
