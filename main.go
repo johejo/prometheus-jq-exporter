@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,12 @@ var (
 	enableUnixSocketTransport = flag.Bool("enable-unix-socket-transport", false, "enable unix socket transport")
 
 	httpClient = sync.OnceValue(initHTTPClient)
+)
+
+const (
+	valueTypeCounter = "counter"
+	valueTypeGauge   = "gauge"
+	valueTypeUntyped = "untyped"
 )
 
 func main() {
@@ -337,7 +344,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			return
 		}
 
-		metricSet := metrics.NewSet()
+		metricSet := newProbeMetricSet()
 		for _, m := range mod.Metrics {
 			var value any
 			if m.Query == "" {
@@ -364,7 +371,62 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 	}
 }
 
-func makeMetrics(ctx context.Context, metricSet *metrics.Set, value any, m Metric) error {
+type untypedMetric struct {
+	family string
+	name   string
+	value  float64
+}
+
+type probeMetricSet struct {
+	*metrics.Set
+	untyped     map[string]untypedMetric
+	familyTypes map[string]string
+}
+
+func newProbeMetricSet() *probeMetricSet {
+	s := &probeMetricSet{
+		Set:         metrics.NewSet(),
+		untyped:     make(map[string]untypedMetric),
+		familyTypes: make(map[string]string),
+	}
+	s.RegisterMetricsWriter(s.writeUntyped)
+	return s
+}
+
+func (s *probeMetricSet) registerFamily(family, valueType string) error {
+	if existingType, ok := s.familyTypes[family]; ok && existingType != valueType {
+		return fmt.Errorf("metric family %s has conflicting valueTypes %s and %s", family, existingType, valueType)
+	}
+	s.familyTypes[family] = valueType
+	return nil
+}
+
+func (s *probeMetricSet) writeUntyped(w io.Writer) {
+	untyped := make([]untypedMetric, 0, len(s.untyped))
+	for _, m := range s.untyped {
+		untyped = append(untyped, m)
+	}
+	sort.Slice(untyped, func(i, j int) bool {
+		if untyped[i].family != untyped[j].family {
+			return untyped[i].family < untyped[j].family
+		}
+		return untyped[i].name < untyped[j].name
+	})
+	previousFamily := ""
+	for _, m := range untyped {
+		if m.family != previousFamily {
+			metrics.WriteMetadataIfNeeded(w, m.name, valueTypeUntyped)
+			previousFamily = m.family
+		}
+		if float64(int64(m.value)) == m.value {
+			fmt.Fprintf(w, "%s %d\n", m.name, int64(m.value))
+		} else {
+			fmt.Fprintf(w, "%s %g\n", m.name, m.value)
+		}
+	}
+}
+
+func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Metric) error {
 	var name strings.Builder
 	nameResult, err := jq(ctx, m.Name, value, true)
 	if err != nil {
@@ -382,6 +444,7 @@ func makeMetrics(ctx context.Context, metricSet *metrics.Set, value any, m Metri
 	if err := metrics.ValidateMetric(metricName); err != nil {
 		return fmt.Errorf("invalid metric %q: %w", metricName, err)
 	}
+	metricFamily := fmt.Sprint(nameResult)
 
 	v, err := jq(ctx, m.Value, value, false)
 	if err != nil {
@@ -389,18 +452,37 @@ func makeMetrics(ctx context.Context, metricSet *metrics.Set, value any, m Metri
 	}
 
 	switch m.ValueType {
-	case "counter":
+	case valueTypeCounter:
 		counterValue, err := asCounterValue(v)
 		if err != nil {
 			return err
 		}
+		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
+			return err
+		}
 		metricSet.GetOrCreateCounter(metricName).Set(counterValue)
-	case "gauge":
+	case valueTypeGauge:
 		gaugeValue, err := asGaugeValue(v)
 		if err != nil {
 			return err
 		}
+		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
+			return err
+		}
 		metricSet.GetOrCreateGauge(metricName, nil).Set(gaugeValue)
+	case valueTypeUntyped:
+		untypedValue, err := asGaugeValue(v)
+		if err != nil {
+			return err
+		}
+		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
+			return err
+		}
+		metricSet.untyped[metricName] = untypedMetric{
+			family: metricFamily,
+			name:   metricName,
+			value:  untypedValue,
+		}
 	default:
 		return fmt.Errorf("valueType %s is not supported", m.ValueType)
 	}
@@ -431,6 +513,14 @@ func loadConfig(config string, expandEnv bool) (*Config, error) {
 	if err := unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
+	for moduleName, module := range cfg.Modules {
+		for i := range module.Metrics {
+			if module.Metrics[i].ValueType == "" {
+				module.Metrics[i].ValueType = valueTypeUntyped
+			}
+		}
+		cfg.Modules[moduleName] = module
+	}
 	return &cfg, nil
 }
 
@@ -449,7 +539,7 @@ type Metric struct {
 	Query     Query            `json:"query" yaml:"query"` // optional
 	Name      Query            `json:"name" yaml:"name"`
 	Labels    map[string]Query `json:"labels" yaml:"labels"`
-	ValueType string           `json:"valueType" yaml:"valueType"` // "counter", "gauge"
+	ValueType string           `json:"valueType" yaml:"valueType"` // "counter", "gauge", "untyped" (default)
 	Value     Query            `json:"value" yaml:"value"`
 }
 

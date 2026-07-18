@@ -349,6 +349,97 @@ func TestLoadConfigValidStatusCodes(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDefaultsValueTypeToUntyped(t *testing.T) {
+	tests := map[string]string{
+		"yaml": "modules:\n  test:\n    metrics:\n      - name: test_metric\n        value: 1\n",
+		"json": `{"modules":{"test":{"metrics":[{"name":"test_metric","value":"1"}]}}}`,
+	}
+
+	for extension, content := range tests {
+		t.Run(extension, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config."+extension)
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := must[*Config](t)(loadConfig(configPath, false))
+			assert(t, valueTypeUntyped, cfg.Modules["test"].Metrics[0].ValueType)
+		})
+	}
+}
+
+func TestMakeMetricsUntyped(t *testing.T) {
+	metricSet := newProbeMetricSet()
+	metric := Metric{
+		Name:      "probe_value",
+		Labels:    map[string]Query{"id": ".id"},
+		ValueType: valueTypeUntyped,
+		Value:     ".value",
+	}
+	for _, value := range []any{
+		map[string]any{"id": "b", "value": -2},
+		map[string]any{"id": "a", "value": 1.5},
+	} {
+		if err := makeMetrics(t.Context(), metricSet, value, metric); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	metrics.ExposeMetadata(false)
+	var withoutMetadata strings.Builder
+	metricSet.WritePrometheus(&withoutMetadata)
+	assert(t, trim(`
+probe_value{id="a"} 1.5
+probe_value{id="b"} -2
+`), withoutMetadata.String())
+
+	metrics.ExposeMetadata(true)
+	t.Cleanup(func() { metrics.ExposeMetadata(false) })
+	var withMetadata strings.Builder
+	metricSet.WritePrometheus(&withMetadata)
+	assert(t, trim(`
+# HELP probe_value
+# TYPE probe_value untyped
+probe_value{id="a"} 1.5
+probe_value{id="b"} -2
+`), withMetadata.String())
+}
+
+func TestMakeMetricsRejectsConflictingValueTypes(t *testing.T) {
+	metricSet := newProbeMetricSet()
+	for _, valueType := range []string{valueTypeGauge, valueTypeUntyped} {
+		err := makeMetrics(t.Context(), metricSet, nil, Metric{
+			Name:      "probe_value",
+			ValueType: valueType,
+			Value:     "1",
+		})
+		if valueType == valueTypeGauge && err != nil {
+			t.Fatal(err)
+		}
+		if valueType == valueTypeUntyped {
+			if err == nil {
+				t.Fatal("expected conflicting valueType error")
+			}
+			if !strings.Contains(err.Error(), "conflicting valueTypes") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+}
+
+func TestMakeMetricsRejectsUnknownValueType(t *testing.T) {
+	err := makeMetrics(t.Context(), newProbeMetricSet(), nil, Metric{
+		Name:      "probe_value",
+		ValueType: "unknown",
+		Value:     "1",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported valueType error")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
 	tests := map[string]Metric{
 		"metric name": {
@@ -365,7 +456,7 @@ func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
 	}
 	for name, metric := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := makeMetrics(t.Context(), metrics.NewSet(), nil, metric)
+			err := makeMetrics(t.Context(), newProbeMetricSet(), nil, metric)
 			if err == nil {
 				t.Fatal("expected invalid metric error")
 			}

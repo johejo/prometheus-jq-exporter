@@ -50,6 +50,8 @@ modules:
 
 When `valid_status_codes` is omitted or empty, only 2xx responses are accepted. When it is set, only the listed status codes are accepted, including non-2xx responses.
 
+Each metric accepts `valueType: counter`, `valueType: gauge`, or `valueType: untyped`. When `valueType` is omitted, it defaults to `untyped`. Prefer `counter` or `gauge` when the source metric's semantics are known.
+
 ```
 $ prometheus-jq-exporter --config ./testdata/config.yaml
 ```
