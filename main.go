@@ -291,17 +291,20 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 		module := q.Get("module")
 		if module == "" {
 			slog.Warn("no module found in query")
+			http.Error(w, "Module parameter is missing", http.StatusBadRequest)
 			return
 		}
 		mod, ok := cfg.Modules[module]
 		if !ok {
 			slog.Warn("no module found in config", "module", module)
+			http.Error(w, fmt.Sprintf("Unknown module %q", module), http.StatusBadRequest)
 			return
 		}
 
 		target := q.Get("target")
 		if target == "" {
 			slog.Warn("no target found in query")
+			http.Error(w, "Target parameter is missing", http.StatusBadRequest)
 			return
 		}
 
@@ -315,12 +318,14 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 		body, err := makeBodyFromTemplate(q, mod.Body.Content)
 		if err != nil {
 			slog.Error(err.Error())
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 		var bodyJSON any
 		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body)
 		if err != nil {
 			slog.Error(err.Error())
+			http.Error(w, "Failed to fetch JSON response. TARGET: "+target+", ERROR: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 
@@ -333,6 +338,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 				value, err = jq(ctx, m.Query, bodyJSON, false)
 				if err != nil {
 					slog.Error(err.Error())
+					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
 			}
@@ -341,6 +347,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			for _, value := range values {
 				if err := makeMetrics(ctx, metricSet, value, m); err != nil {
 					slog.Error(err.Error())
+					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 					return
 				}
 			}

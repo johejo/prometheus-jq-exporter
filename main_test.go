@@ -208,6 +208,77 @@ func TestProbeEscapesLabelValues(t *testing.T) {
 	assert(t, "probe_value{label=\"quote\\\"line\\nbreak\\\\\"} 1\n", body)
 }
 
+func TestProbeErrorStatus(t *testing.T) {
+	invalidJSONTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not JSON")
+	}))
+	t.Cleanup(invalidJSONTarget.Close)
+	validJSONTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(validJSONTarget.Close)
+
+	tests := map[string]struct {
+		cfg    *Config
+		target string
+		want   int
+	}{
+		"missing module": {
+			cfg:    &Config{},
+			target: "/probe?target=" + url.QueryEscape(invalidJSONTarget.URL),
+			want:   http.StatusBadRequest,
+		},
+		"unknown module": {
+			cfg:    &Config{},
+			target: "/probe?module=unknown&target=" + url.QueryEscape(invalidJSONTarget.URL),
+			want:   http.StatusBadRequest,
+		},
+		"missing target": {
+			cfg:    &Config{Modules: map[string]Module{"test": {}}},
+			target: "/probe?module=test",
+			want:   http.StatusBadRequest,
+		},
+		"invalid target": {
+			cfg:    &Config{Modules: map[string]Module{"test": {}}},
+			target: "/probe?module=test&target=%3A%2F%2F",
+			want:   http.StatusServiceUnavailable,
+		},
+		"invalid JSON response": {
+			cfg:    &Config{Modules: map[string]Module{"test": {}}},
+			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
+			want:   http.StatusServiceUnavailable,
+		},
+		"invalid body template": {
+			cfg: &Config{Modules: map[string]Module{"test": {
+				Body: Body{Content: "{{"},
+			}}},
+			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
+			want:   http.StatusInternalServerError,
+		},
+		"invalid jq query": {
+			cfg: &Config{Modules: map[string]Module{"test": {
+				Metrics: []Metric{{Query: "("}},
+			}}},
+			target: "/probe?module=test&target=" + url.QueryEscape(validJSONTarget.URL),
+			want:   http.StatusInternalServerError,
+		},
+		"invalid metric": {
+			cfg: &Config{Modules: map[string]Module{"test": {
+				Metrics: []Metric{{Name: `"invalid-name"`, ValueType: "gauge", Value: "1"}},
+			}}},
+			target: "/probe?module=test&target=" + url.QueryEscape(validJSONTarget.URL),
+			want:   http.StatusInternalServerError,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result := testReq(http.MethodGet, test.target, nil, handleProbe(test.cfg))
+			assert(t, test.want, result.StatusCode)
+		})
+	}
+}
+
 func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
 	tests := map[string]Metric{
 		"metric name": {
