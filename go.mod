@@ -6,7 +6,6 @@ require (
 	github.com/VictoriaMetrics/metrics v1.35.1
 	github.com/goccy/go-yaml v1.14.3
 	github.com/itchyny/gojq v0.12.16
-	github.com/klauspost/compress v1.17.11
 )
 
 require (

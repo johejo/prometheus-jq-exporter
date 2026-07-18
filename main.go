@@ -24,7 +24,6 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/goccy/go-yaml"
 	"github.com/itchyny/gojq"
-	"github.com/klauspost/compress/gzhttp"
 )
 
 var (
@@ -55,7 +54,7 @@ func main() {
 	mux.HandleFunc("GET /probe", handleProbe(cfg))
 
 	slog.Info("listening", "addr", *addr)
-	http.ListenAndServe(*addr, gzhttp.GzipHandler(mux))
+	http.ListenAndServe(*addr, mux)
 }
 
 func jq(ctx context.Context, query Query, value any, fallback bool) (any, error) {
@@ -107,7 +106,7 @@ func initHTTPClient() *http.Client {
 	}
 
 	return &http.Client{
-		Transport: gzhttp.Transport(transport),
+		Transport: transport,
 	}
 }
 
