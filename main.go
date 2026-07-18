@@ -65,12 +65,11 @@ func main() {
 	http.ListenAndServe(*addr, mux)
 }
 
-func jq(ctx context.Context, query Query, value any, fallback bool) (any, error) {
-	q, err := gojq.Parse(query)
-	if err != nil {
-		return nil, err
+func jq(ctx context.Context, query compiledQuery, value any) (any, error) {
+	if query.code == nil {
+		return query.source, nil
 	}
-	iter := q.RunWithContext(ctx, value)
+	iter := query.code.RunWithContext(ctx, value)
 	var result any
 	for {
 		v, ok := iter.Next()
@@ -80,10 +79,6 @@ func jq(ctx context.Context, query Query, value any, fallback bool) (any, error)
 		if err, ok := v.(error); ok {
 			if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
 				break
-			}
-			if fallback {
-				// fallback to use query as result
-				return query, nil
 			}
 			return nil, err
 		}
@@ -169,10 +164,10 @@ func initLogger(loglevel string) {
 	)))
 }
 
-func makeLabelKV(ctx context.Context, labels map[string]Query, value any) (string, error) {
+func makeLabelKV(ctx context.Context, labels map[string]compiledQuery, value any) (string, error) {
 	var labelKV []string
 	for labelName, labelQuery := range labels {
-		_labelValue, err := jq(ctx, labelQuery, value, true)
+		_labelValue, err := jq(ctx, labelQuery, value)
 		if err != nil {
 			return "", err
 		}
@@ -350,10 +345,10 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 		metricErrors := 0
 		for metricIndex, m := range mod.Metrics {
 			var value any
-			if m.Query == "" {
+			if m.query == nil {
 				value = bodyJSON
 			} else {
-				value, err = jq(ctx, m.Query, bodyJSON, false)
+				value, err = jq(ctx, *m.query, bodyJSON)
 				if err != nil {
 					metricErrors++
 					slog.Error("failed to query metric values", "metric_index", metricIndex, "metric", m.Name, "query", m.Query, "error", err)
@@ -440,11 +435,11 @@ func (s *probeMetricSet) WritePrometheus(w io.Writer) {
 	}
 }
 
-func makeEpochTimestamp(ctx context.Context, query Query, value any) (*int64, error) {
-	if query == "" {
+func makeEpochTimestamp(ctx context.Context, query *compiledQuery, value any) (*int64, error) {
+	if query == nil {
 		return nil, nil
 	}
-	result, err := jq(ctx, query, value, false)
+	result, err := jq(ctx, *query, value)
 	if err != nil {
 		return nil, err
 	}
@@ -473,13 +468,13 @@ func makeEpochTimestamp(ctx context.Context, query Query, value any) (*int64, er
 
 func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Metric) error {
 	var name strings.Builder
-	nameResult, err := jq(ctx, m.Name, value, true)
+	nameResult, err := jq(ctx, m.name, value)
 	if err != nil {
 		return err
 	}
 	name.WriteString(fmt.Sprint(nameResult))
 	name.WriteString("{")
-	labelKV, err := makeLabelKV(ctx, m.Labels, value)
+	labelKV, err := makeLabelKV(ctx, m.labels, value)
 	if err != nil {
 		return err
 	}
@@ -491,13 +486,13 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 	}
 	metricFamily := fmt.Sprint(nameResult)
 
-	v, err := jq(ctx, m.Value, value, false)
+	v, err := jq(ctx, m.value, value)
 	if err != nil {
 		return err
 	}
-	epochTimestamp, err := makeEpochTimestamp(ctx, m.EpochTimestamp, value)
+	epochTimestamp, err := makeEpochTimestamp(ctx, m.epochTimestamp, value)
 	if err != nil {
-		slog.Error("failed to extract epoch timestamp for metric", "metric", metricName, "query", m.EpochTimestamp, "error", err)
+		slog.Error("failed to extract epoch timestamp for metric", "metric", metricName, "query", m.epochTimestamp.source, "error", err)
 		epochTimestamp = nil
 	}
 	probeMetric := probeMetric{
@@ -574,7 +569,97 @@ func loadConfig(config string, expandEnv bool) (*Config, error) {
 		}
 		cfg.Modules[moduleName] = module
 	}
+	if err := compileConfig(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+type compiledQuery struct {
+	source Query
+	code   *gojq.Code
+}
+
+type queryCompileResult struct {
+	code       *gojq.Code
+	parseErr   error
+	compileErr error
+}
+
+type queryCompiler map[Query]queryCompileResult
+
+func (c queryCompiler) compile(source Query, literalFallback bool) (compiledQuery, error) {
+	result, ok := c[source]
+	if !ok {
+		query, err := gojq.Parse(source)
+		if err != nil {
+			result.parseErr = err
+		} else {
+			result.code, result.compileErr = gojq.Compile(query)
+		}
+		c[source] = result
+	}
+	if result.parseErr != nil {
+		return compiledQuery{}, result.parseErr
+	}
+	if result.compileErr != nil {
+		if literalFallback {
+			return compiledQuery{source: source}, nil
+		}
+		return compiledQuery{}, result.compileErr
+	}
+	return compiledQuery{source: source, code: result.code}, nil
+}
+
+func compileConfig(cfg *Config) error {
+	compiler := make(queryCompiler)
+	for moduleName, module := range cfg.Modules {
+		for metricIndex, metric := range module.Metrics {
+			compiledMetric, err := compileMetric(compiler, metric)
+			if err != nil {
+				return fmt.Errorf("module %q metric %d: %w", moduleName, metricIndex, err)
+			}
+			module.Metrics[metricIndex] = compiledMetric
+		}
+		cfg.Modules[moduleName] = module
+	}
+	return nil
+}
+
+func compileMetric(compiler queryCompiler, metric Metric) (Metric, error) {
+	compiled := metric
+	compiled.labels = make(map[string]compiledQuery, len(metric.Labels))
+	var err error
+	if metric.Query != "" {
+		query, compileErr := compiler.compile(metric.Query, false)
+		if compileErr != nil {
+			return Metric{}, fmt.Errorf("query: %w", compileErr)
+		}
+		compiled.query = &query
+	}
+	compiled.name, err = compiler.compile(metric.Name, true)
+	if err != nil {
+		return Metric{}, fmt.Errorf("name: %w", err)
+	}
+	for labelName, labelQuery := range metric.Labels {
+		compiledLabel, compileErr := compiler.compile(labelQuery, true)
+		if compileErr != nil {
+			return Metric{}, fmt.Errorf("label %q: %w", labelName, compileErr)
+		}
+		compiled.labels[labelName] = compiledLabel
+	}
+	compiled.value, err = compiler.compile(metric.Value, false)
+	if err != nil {
+		return Metric{}, fmt.Errorf("value: %w", err)
+	}
+	if metric.EpochTimestamp != "" {
+		epochTimestamp, compileErr := compiler.compile(metric.EpochTimestamp, false)
+		if compileErr != nil {
+			return Metric{}, fmt.Errorf("epochTimestamp: %w", compileErr)
+		}
+		compiled.epochTimestamp = &epochTimestamp
+	}
+	return compiled, nil
 }
 
 type Config struct {
@@ -595,6 +680,11 @@ type Metric struct {
 	ValueType      string           `json:"valueType" yaml:"valueType"` // "counter", "gauge", "untyped" (default)
 	Value          Query            `json:"value" yaml:"value"`
 	EpochTimestamp Query            `json:"epochTimestamp" yaml:"epochTimestamp"` // optional, Unix milliseconds
+	query          *compiledQuery
+	name           compiledQuery
+	labels         map[string]compiledQuery
+	value          compiledQuery
+	epochTimestamp *compiledQuery
 }
 
 type Query = string

@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/VictoriaMetrics/metrics"
+	"github.com/itchyny/gojq"
 )
 
 func Test(t *testing.T) {
@@ -31,7 +32,6 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	t.Run("file", func(t *testing.T) {
 		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg))
 		assert(t, 200, result.StatusCode)
@@ -121,7 +121,7 @@ func TestProbeMetricsAreRequestScoped(t *testing.T) {
 	}))
 	t.Cleanup(target.Close)
 
-	probe := handleProbe(cfg)
+	probe := handleProbe(mustCompileConfig(t, cfg))
 	request := func(path string) string {
 		t.Helper()
 		query := "/probe?module=test&target=" + url.QueryEscape(target.URL+path)
@@ -203,7 +203,7 @@ func TestProbeEscapesLabelValues(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, "probe_value{label=\"quote\\\"line\\nbreak\\\\\"} 1\n", body)
@@ -256,9 +256,9 @@ func TestProbeErrorStatus(t *testing.T) {
 			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
 			want:   http.StatusInternalServerError,
 		},
-		"invalid jq query": {
+		"jq query evaluation failure": {
 			cfg: &Config{Modules: map[string]Module{"test": {
-				Metrics: []Metric{{Query: "("}},
+				Metrics: []Metric{{Name: "failed_metric", Query: `error("failed")`, Value: "1"}},
 			}}},
 			target: "/probe?module=test&target=" + url.QueryEscape(validJSONTarget.URL),
 			want:   http.StatusInternalServerError,
@@ -274,7 +274,7 @@ func TestProbeErrorStatus(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			result := testReq(http.MethodGet, test.target, nil, handleProbe(test.cfg))
+			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg)))
 			assert(t, test.want, result.StatusCode)
 		})
 	}
@@ -290,7 +290,7 @@ func TestProbeMetricGenerationPartialFailure(t *testing.T) {
 		"metric query failure": {
 			body: `{}`,
 			metrics: []Metric{
-				{Name: "failed_metric", Query: "(", ValueType: valueTypeGauge, Value: "1"},
+				{Name: "failed_metric", Query: `error("failed")`, ValueType: valueTypeGauge, Value: "1"},
 				{Name: "successful_metric", ValueType: valueTypeGauge, Value: "2"},
 			},
 			wantStatus: http.StatusOK,
@@ -346,7 +346,7 @@ item_value{id="c"} 3
 				"test": {Metrics: test.metrics},
 			}}
 			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
 			assert(t, test.wantStatus, result.StatusCode)
 			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			assert(t, test.wantBody, body)
@@ -399,7 +399,7 @@ func TestProbeValidStatusCodes(t *testing.T) {
 			}}
 			probeTarget := fmt.Sprintf("%s?status=%d", target.URL, test.status)
 			query := "/probe?module=test&target=" + url.QueryEscape(probeTarget)
-			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
 			assert(t, test.want, result.StatusCode)
 		})
 	}
@@ -459,6 +459,132 @@ func TestLoadConfigEpochTimestamp(t *testing.T) {
 	}
 }
 
+func TestCompileConfigCompilesAndReusesQueries(t *testing.T) {
+	cfg := &Config{Modules: map[string]Module{
+		"test": {
+			Metrics: []Metric{{
+				Query:          ".value",
+				Name:           ".value",
+				Labels:         map[string]Query{"value": ".value"},
+				ValueType:      valueTypeGauge,
+				Value:          ".value",
+				EpochTimestamp: ".value",
+			}},
+		},
+	}}
+
+	compiled := mustCompileConfig(t, cfg).Modules["test"].Metrics[0]
+	wantCode := compiled.query.code
+	for field, gotCode := range map[string]*gojq.Code{
+		"name":           compiled.name.code,
+		"label":          compiled.labels["value"].code,
+		"value":          compiled.value.code,
+		"epochTimestamp": compiled.epochTimestamp.code,
+	} {
+		if gotCode != wantCode {
+			t.Errorf("%s did not reuse the compiled query", field)
+		}
+	}
+}
+
+func TestCompileConfigRejectsInvalidQueries(t *testing.T) {
+	tests := map[string]struct {
+		metric Metric
+		field  string
+	}{
+		"query parse error": {
+			metric: Metric{Query: "(", Name: "metric", Value: "1"},
+			field:  "query",
+		},
+		"query compile error": {
+			metric: Metric{Query: "unknown_function", Name: "metric", Value: "1"},
+			field:  "query",
+		},
+		"name parse error": {
+			metric: Metric{Name: "(", Value: "1"},
+			field:  "name",
+		},
+		"label parse error": {
+			metric: Metric{Name: "metric", Labels: map[string]Query{"label": "("}, Value: "1"},
+			field:  `label "label"`,
+		},
+		"value compile error": {
+			metric: Metric{Name: "metric", Value: "unknown_function"},
+			field:  "value",
+		},
+		"epoch timestamp parse error": {
+			metric: Metric{Name: "metric", Value: "1", EpochTimestamp: "("},
+			field:  "epochTimestamp",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := compileConfig(&Config{Modules: map[string]Module{
+				"test": {Metrics: []Metric{test.metric}},
+			}})
+			if err == nil {
+				t.Fatal("expected query compilation error")
+			}
+			for _, part := range []string{`module "test"`, "metric 0", test.field} {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q does not contain %q", err, part)
+				}
+			}
+		})
+	}
+}
+
+func TestCompileConfigPreservesLiteralFallback(t *testing.T) {
+	metric := mustCompileConfig(t, &Config{Modules: map[string]Module{
+		"test": {Metrics: []Metric{{
+			Name:      "probe_value",
+			Labels:    map[string]Query{"kind": "static"},
+			ValueType: valueTypeGauge,
+			Value:     "1",
+		}}},
+	}}).Modules["test"].Metrics[0]
+
+	if metric.name.code != nil || metric.labels["kind"].code != nil {
+		t.Fatal("literal name and label should not have executable jq code")
+	}
+	metricSet := newProbeMetricSet()
+	if err := makeMetrics(t.Context(), metricSet, nil, metric); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	metricSet.WritePrometheus(&output)
+	assert(t, "probe_value{kind=\"static\"} 1\n", output.String())
+}
+
+func TestCompiledNameAndLabelDoNotFallbackAfterEvaluationErrors(t *testing.T) {
+	tests := map[string]Metric{
+		"name": {
+			Name:      `error("failed name")`,
+			ValueType: valueTypeGauge,
+			Value:     "1",
+		},
+		"label": {
+			Name:      "probe_value",
+			Labels:    map[string]Query{"kind": `error("failed label")`},
+			ValueType: valueTypeGauge,
+			Value:     "1",
+		},
+	}
+
+	for name, metric := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := makeMetrics(t.Context(), newProbeMetricSet(), nil, mustCompileMetric(t, metric))
+			if err == nil {
+				t.Fatal("expected jq evaluation error")
+			}
+			if !strings.Contains(err.Error(), "failed "+name) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestProbeEpochTimestampPerValue(t *testing.T) {
 	cfg := &Config{Modules: map[string]Module{
 		"test": {
@@ -480,7 +606,7 @@ func TestProbeEpochTimestampPerValue(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, trim(`
@@ -497,7 +623,7 @@ func TestMakeMetricsEpochTimestampValueTypes(t *testing.T) {
 		{Name: "probe_gauge", ValueType: valueTypeGauge, Value: "1.5", EpochTimestamp: ".timestamp"},
 		{Name: "probe_untyped", ValueType: valueTypeUntyped, Value: "-2", EpochTimestamp: ".timestamp"},
 	} {
-		if err := makeMetrics(t.Context(), metricSet, map[string]any{"timestamp": float64(1712345678901)}, metric); err != nil {
+		if err := makeMetrics(t.Context(), metricSet, map[string]any{"timestamp": float64(1712345678901)}, mustCompileMetric(t, metric)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -517,8 +643,8 @@ func TestMakeMetricsEpochTimestampFallback(t *testing.T) {
 		query Query
 		value any
 	}{
-		"invalid query": {query: "(", value: map[string]any{"timestamp": 1}},
-		"missing value": {query: ".timestamp", value: map[string]any{}},
+		"query evaluation error": {query: `error("failed")`, value: map[string]any{"timestamp": 1}},
+		"missing value":          {query: ".timestamp", value: map[string]any{}},
 		"fractional value": {
 			query: ".timestamp",
 			value: map[string]any{"timestamp": 1.5},
@@ -532,12 +658,12 @@ func TestMakeMetricsEpochTimestampFallback(t *testing.T) {
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			metricSet := newProbeMetricSet()
-			err := makeMetrics(t.Context(), metricSet, test.value, Metric{
+			err := makeMetrics(t.Context(), metricSet, test.value, mustCompileMetric(t, Metric{
 				Name:           "probe_value",
 				ValueType:      valueTypeGauge,
 				Value:          "1",
 				EpochTimestamp: test.query,
-			})
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -562,7 +688,7 @@ func TestMakeMetricsUntyped(t *testing.T) {
 		map[string]any{"id": "b", "value": -2},
 		map[string]any{"id": "a", "value": 1.5},
 	} {
-		if err := makeMetrics(t.Context(), metricSet, value, metric); err != nil {
+		if err := makeMetrics(t.Context(), metricSet, value, mustCompileMetric(t, metric)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -590,11 +716,11 @@ probe_value{id="b"} -2
 func TestMakeMetricsRejectsConflictingValueTypes(t *testing.T) {
 	metricSet := newProbeMetricSet()
 	for _, valueType := range []string{valueTypeGauge, valueTypeUntyped} {
-		err := makeMetrics(t.Context(), metricSet, nil, Metric{
+		err := makeMetrics(t.Context(), metricSet, nil, mustCompileMetric(t, Metric{
 			Name:      "probe_value",
 			ValueType: valueType,
 			Value:     "1",
-		})
+		}))
 		if valueType == valueTypeGauge && err != nil {
 			t.Fatal(err)
 		}
@@ -610,11 +736,11 @@ func TestMakeMetricsRejectsConflictingValueTypes(t *testing.T) {
 }
 
 func TestMakeMetricsRejectsUnknownValueType(t *testing.T) {
-	err := makeMetrics(t.Context(), newProbeMetricSet(), nil, Metric{
+	err := makeMetrics(t.Context(), newProbeMetricSet(), nil, mustCompileMetric(t, Metric{
 		Name:      "probe_value",
 		ValueType: "unknown",
 		Value:     "1",
-	})
+	}))
 	if err == nil {
 		t.Fatal("expected unsupported valueType error")
 	}
@@ -639,7 +765,7 @@ func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
 	}
 	for name, metric := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := makeMetrics(t.Context(), newProbeMetricSet(), nil, metric)
+			err := makeMetrics(t.Context(), newProbeMetricSet(), nil, mustCompileMetric(t, metric))
 			if err == nil {
 				t.Fatal("expected invalid metric error")
 			}
@@ -652,6 +778,23 @@ func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
 
 func trim(s string) string {
 	return strings.TrimPrefix(s, "\n")
+}
+
+func mustCompileConfig(t *testing.T, cfg *Config) *Config {
+	t.Helper()
+	if err := compileConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func mustCompileMetric(t *testing.T, metric Metric) Metric {
+	t.Helper()
+	compiled, err := compileMetric(make(queryCompiler), metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
 }
 
 func testReq(method string, target string, body io.Reader, handler http.Handler) *http.Response {
