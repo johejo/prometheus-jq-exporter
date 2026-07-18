@@ -346,27 +346,34 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 		}
 
 		metricSet := newProbeMetricSet()
-		for _, m := range mod.Metrics {
+		successfulMetrics := 0
+		metricErrors := 0
+		for metricIndex, m := range mod.Metrics {
 			var value any
 			if m.Query == "" {
 				value = bodyJSON
 			} else {
 				value, err = jq(ctx, m.Query, bodyJSON, false)
 				if err != nil {
-					slog.Error(err.Error())
-					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-					return
+					metricErrors++
+					slog.Error("failed to query metric values", "metric_index", metricIndex, "metric", m.Name, "query", m.Query, "error", err)
+					continue
 				}
 			}
 			values := asSlice(value)
 
-			for _, value := range values {
+			for valueIndex, value := range values {
 				if err := makeMetrics(ctx, metricSet, value, m); err != nil {
-					slog.Error(err.Error())
-					http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-					return
+					metricErrors++
+					slog.Error("failed to make metric", "metric_index", metricIndex, "metric", m.Name, "value_index", valueIndex, "error", err)
+					continue
 				}
+				successfulMetrics++
 			}
+		}
+		if metricErrors > 0 && successfulMetrics == 0 {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
 		}
 		metricSet.WritePrometheus(w)
 	}

@@ -280,6 +280,80 @@ func TestProbeErrorStatus(t *testing.T) {
 	}
 }
 
+func TestProbeMetricGenerationPartialFailure(t *testing.T) {
+	tests := map[string]struct {
+		body       string
+		metrics    []Metric
+		wantStatus int
+		wantBody   string
+	}{
+		"metric query failure": {
+			body: `{}`,
+			metrics: []Metric{
+				{Name: "failed_metric", Query: "(", ValueType: valueTypeGauge, Value: "1"},
+				{Name: "successful_metric", ValueType: valueTypeGauge, Value: "2"},
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   "successful_metric{} 2\n",
+		},
+		"value failure": {
+			body: `{"items":[{"id":"a","value":1},{"id":"b","value":"invalid"},{"id":"c","value":3}]}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     ".items",
+				Labels:    map[string]Query{"id": ".id"},
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody: trim(`
+item_value{id="a"} 1
+item_value{id="c"} 3
+`),
+		},
+		"all values fail": {
+			body: `{"items":[{"value":"invalid"}]}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     ".items",
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   "Internal Server Error\n",
+		},
+		"empty values": {
+			body: `{"items":[]}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     ".items",
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   "",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, test.body)
+			}))
+			t.Cleanup(target.Close)
+
+			cfg := &Config{Modules: map[string]Module{
+				"test": {Metrics: test.metrics},
+			}}
+			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
+			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+			assert(t, test.wantStatus, result.StatusCode)
+			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+			assert(t, test.wantBody, body)
+		})
+	}
+}
+
 func TestProbeValidStatusCodes(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status := must[int](t)(strconv.Atoi(r.URL.Query().Get("status")))
