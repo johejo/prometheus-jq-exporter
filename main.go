@@ -314,6 +314,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			return
 		}
 
+		metricSet := metrics.NewSet()
 		for _, m := range mod.Metrics {
 			var value any
 			if m.Query == "" {
@@ -328,17 +329,17 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			values := asSlice(value)
 
 			for _, value := range values {
-				if err := makeMetrics(ctx, value, m); err != nil {
+				if err := makeMetrics(ctx, metricSet, value, m); err != nil {
 					slog.Error(err.Error())
 					return
 				}
 			}
 		}
-		metrics.WritePrometheus(w, false)
+		metricSet.WritePrometheus(w)
 	}
 }
 
-func makeMetrics(ctx context.Context, value any, m Metric) error {
+func makeMetrics(ctx context.Context, metricSet *metrics.Set, value any, m Metric) error {
 	var name strings.Builder
 	nameResult, err := jq(ctx, m.Name, value, true)
 	if err != nil {
@@ -364,15 +365,13 @@ func makeMetrics(ctx context.Context, value any, m Metric) error {
 		if err != nil {
 			return err
 		}
-		metrics.GetOrCreateCounter(name.String()).Set(counterValue)
+		metricSet.GetOrCreateCounter(name.String()).Set(counterValue)
 	case "gauge":
 		gaugeValue, err := asGaugeValue(v)
 		if err != nil {
 			return err
 		}
-		metrics.GetOrCreateGauge(name.String(), func() float64 {
-			return gaugeValue
-		})
+		metricSet.GetOrCreateGauge(name.String(), nil).Set(gaugeValue)
 	default:
 		return fmt.Errorf("valueType %s is not supported", m.ValueType)
 	}

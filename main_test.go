@@ -6,12 +6,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/VictoriaMetrics/metrics"
 )
 
 func Test(t *testing.T) {
@@ -84,6 +88,82 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
 tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 `)
 		assert(t, want, b)
+	})
+}
+
+func TestProbeMetricsAreRequestScoped(t *testing.T) {
+	cfg := &Config{Modules: map[string]Module{
+		"test": {
+			Metrics: []Metric{
+				{
+					Name:      "probe_value",
+					Query:     ".items",
+					Labels:    map[string]Query{"id": ".id"},
+					ValueType: "gauge",
+					Value:     ".value",
+				},
+			},
+		},
+	}}
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/first":
+			_, _ = io.WriteString(w, `{"items":[{"id":"a","value":1},{"id":"b","value":2}]}`)
+		case "/second":
+			_, _ = io.WriteString(w, `{"items":[{"id":"a","value":10}]}`)
+		case "/third":
+			_, _ = io.WriteString(w, `{"items":[{"id":"c","value":30}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(target.Close)
+
+	probe := handleProbe(cfg)
+	request := func(path string) string {
+		t.Helper()
+		query := "/probe?module=test&target=" + url.QueryEscape(target.URL+path)
+		result := testReq(http.MethodGet, query, nil, probe)
+		assert(t, http.StatusOK, result.StatusCode)
+		return string(must[[]byte](t)(io.ReadAll(result.Body)))
+	}
+
+	metricNamesBefore := strings.Join(metrics.ListMetricNames(), "\n")
+	first := request("/first")
+	assert(t, trim(`
+probe_value{id="a"} 1
+probe_value{id="b"} 2
+`), first)
+
+	second := request("/second")
+	assert(t, trim(`
+probe_value{id="a"} 10
+`), second)
+	assert(t, metricNamesBefore, strings.Join(metrics.ListMetricNames(), "\n"))
+
+	t.Run("concurrent targets", func(t *testing.T) {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		results := make([]string, 2)
+		paths := []string{"/second", "/third"}
+		for i := range paths {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				results[i] = request(paths[i])
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		assert(t, trim(`
+probe_value{id="a"} 10
+`), results[0])
+		assert(t, trim(`
+probe_value{id="c"} 30
+`), results[1])
 	})
 }
 
