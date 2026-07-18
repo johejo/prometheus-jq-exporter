@@ -169,10 +169,20 @@ func makeLabelKV(ctx context.Context, labels map[string]Query, value any) (strin
 			return "", err
 		}
 		labelValue := asLabelValue(_labelValue)
-		labelKV = append(labelKV, fmt.Sprintf(`%s="%s"`, labelName, labelValue))
+		labelKV = append(labelKV, fmt.Sprintf(`%s="%s"`, labelName, escapeLabelValue(labelValue)))
 	}
 	slices.Sort(labelKV)
 	return strings.Join(labelKV, ","), nil
+}
+
+var labelValueEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	"\n", `\n`,
+	`"`, `\"`,
+)
+
+func escapeLabelValue(value string) string {
+	return labelValueEscaper.Replace(value)
 }
 
 func asCounterValue(value any) (uint64, error) {
@@ -353,6 +363,10 @@ func makeMetrics(ctx context.Context, metricSet *metrics.Set, value any, m Metri
 	}
 	name.WriteString(labelKV)
 	name.WriteString("}")
+	metricName := name.String()
+	if err := metrics.ValidateMetric(metricName); err != nil {
+		return fmt.Errorf("invalid metric %q: %w", metricName, err)
+	}
 
 	v, err := jq(ctx, m.Value, value, false)
 	if err != nil {
@@ -365,13 +379,13 @@ func makeMetrics(ctx context.Context, metricSet *metrics.Set, value any, m Metri
 		if err != nil {
 			return err
 		}
-		metricSet.GetOrCreateCounter(name.String()).Set(counterValue)
+		metricSet.GetOrCreateCounter(metricName).Set(counterValue)
 	case "gauge":
 		gaugeValue, err := asGaugeValue(v)
 		if err != nil {
 			return err
 		}
-		metricSet.GetOrCreateGauge(name.String(), nil).Set(gaugeValue)
+		metricSet.GetOrCreateGauge(metricName, nil).Set(gaugeValue)
 	default:
 		return fmt.Errorf("valueType %s is not supported", m.ValueType)
 	}

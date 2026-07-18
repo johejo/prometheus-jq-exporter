@@ -167,6 +167,74 @@ probe_value{id="c"} 30
 	})
 }
 
+func TestEscapeLabelValue(t *testing.T) {
+	tests := map[string]string{
+		"plain":                "plain",
+		`quote"`:               `quote\"`,
+		"line\nbreak":          `line\nbreak`,
+		`backslash\`:           `backslash\\`,
+		"quote\"\nbackslash\\": `quote\"\nbackslash\\`,
+	}
+	for value, want := range tests {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			assert(t, want, escapeLabelValue(value))
+		})
+	}
+}
+
+func TestProbeEscapesLabelValues(t *testing.T) {
+	cfg := &Config{Modules: map[string]Module{
+		"test": {
+			Metrics: []Metric{
+				{
+					Name:      "probe_value",
+					Labels:    map[string]Query{"label": ".label"},
+					ValueType: "gauge",
+					Value:     ".value",
+				},
+			},
+		},
+	}}
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"label":"quote\"line\nbreak\\","value":1}`)
+	}))
+	t.Cleanup(target.Close)
+
+	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
+	result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	assert(t, "probe_value{label=\"quote\\\"line\\nbreak\\\\\"} 1\n", body)
+}
+
+func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
+	tests := map[string]Metric{
+		"metric name": {
+			Name:      `"invalid-name"`,
+			ValueType: "gauge",
+			Value:     "1",
+		},
+		"label name": {
+			Name:      `"valid_metric"`,
+			Labels:    map[string]Query{"invalid-label": `"value"`},
+			ValueType: "gauge",
+			Value:     "1",
+		},
+	}
+	for name, metric := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := makeMetrics(t.Context(), metrics.NewSet(), nil, metric)
+			if err == nil {
+				t.Fatal("expected invalid metric error")
+			}
+			if !strings.Contains(err.Error(), "invalid metric") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func trim(s string) string {
 	return strings.TrimPrefix(s, "\n")
 }
