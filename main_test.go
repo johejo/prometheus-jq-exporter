@@ -367,6 +367,115 @@ func TestLoadConfigDefaultsValueTypeToUntyped(t *testing.T) {
 	}
 }
 
+func TestLoadConfigEpochTimestamp(t *testing.T) {
+	tests := map[string]string{
+		"yaml": "modules:\n  test:\n    metrics:\n      - name: test_metric\n        value: 1\n        epochTimestamp: .timestamp\n",
+		"json": `{"modules":{"test":{"metrics":[{"name":"test_metric","value":"1","epochTimestamp":".timestamp"}]}}}`,
+	}
+
+	for extension, content := range tests {
+		t.Run(extension, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config."+extension)
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := must[*Config](t)(loadConfig(configPath, false))
+			assert(t, Query(".timestamp"), cfg.Modules["test"].Metrics[0].EpochTimestamp)
+		})
+	}
+}
+
+func TestProbeEpochTimestampPerValue(t *testing.T) {
+	cfg := &Config{Modules: map[string]Module{
+		"test": {
+			Metrics: []Metric{
+				{
+					Name:           "probe_value",
+					Query:          ".items",
+					Labels:         map[string]Query{"id": ".id"},
+					ValueType:      valueTypeGauge,
+					Value:          ".value",
+					EpochTimestamp: ".timestamp",
+				},
+			},
+		},
+	}}
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[{"id":"a","value":1,"timestamp":1712345678901},{"id":"b","value":2,"timestamp":"1712345678902"},{"id":"c","value":3}]}`)
+	}))
+	t.Cleanup(target.Close)
+
+	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
+	result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	assert(t, trim(`
+probe_value{id="a"} 1 1712345678901
+probe_value{id="b"} 2 1712345678902
+probe_value{id="c"} 3
+`), body)
+}
+
+func TestMakeMetricsEpochTimestampValueTypes(t *testing.T) {
+	metricSet := newProbeMetricSet()
+	for _, metric := range []Metric{
+		{Name: "probe_counter", ValueType: valueTypeCounter, Value: "3", EpochTimestamp: ".timestamp"},
+		{Name: "probe_gauge", ValueType: valueTypeGauge, Value: "1.5", EpochTimestamp: ".timestamp"},
+		{Name: "probe_untyped", ValueType: valueTypeUntyped, Value: "-2", EpochTimestamp: ".timestamp"},
+	} {
+		if err := makeMetrics(t.Context(), metricSet, map[string]any{"timestamp": float64(1712345678901)}, metric); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	metrics.ExposeMetadata(false)
+	var output strings.Builder
+	metricSet.WritePrometheus(&output)
+	assert(t, trim(`
+probe_counter{} 3 1712345678901
+probe_gauge{} 1.5 1712345678901
+probe_untyped{} -2 1712345678901
+`), output.String())
+}
+
+func TestMakeMetricsEpochTimestampFallback(t *testing.T) {
+	tests := map[string]struct {
+		query Query
+		value any
+	}{
+		"invalid query": {query: "(", value: map[string]any{"timestamp": 1}},
+		"missing value": {query: ".timestamp", value: map[string]any{}},
+		"fractional value": {
+			query: ".timestamp",
+			value: map[string]any{"timestamp": 1.5},
+		},
+		"out of range": {
+			query: ".timestamp",
+			value: map[string]any{"timestamp": "9223372036854775808"},
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			metricSet := newProbeMetricSet()
+			err := makeMetrics(t.Context(), metricSet, test.value, Metric{
+				Name:           "probe_value",
+				ValueType:      valueTypeGauge,
+				Value:          "1",
+				EpochTimestamp: test.query,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			metrics.ExposeMetadata(false)
+			var output strings.Builder
+			metricSet.WritePrometheus(&output)
+			assert(t, "probe_value{} 1\n", output.String())
+		})
+	}
+}
+
 func TestMakeMetricsUntyped(t *testing.T) {
 	metricSet := newProbeMetricSet()
 	metric := Metric{

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -371,26 +372,25 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 	}
 }
 
-type untypedMetric struct {
-	family string
-	name   string
-	value  float64
+type probeMetric struct {
+	family         string
+	name           string
+	valueType      string
+	counterValue   uint64
+	floatValue     float64
+	epochTimestamp *int64
 }
 
 type probeMetricSet struct {
-	*metrics.Set
-	untyped     map[string]untypedMetric
+	metrics     map[string]probeMetric
 	familyTypes map[string]string
 }
 
 func newProbeMetricSet() *probeMetricSet {
-	s := &probeMetricSet{
-		Set:         metrics.NewSet(),
-		untyped:     make(map[string]untypedMetric),
+	return &probeMetricSet{
+		metrics:     make(map[string]probeMetric),
 		familyTypes: make(map[string]string),
 	}
-	s.RegisterMetricsWriter(s.writeUntyped)
-	return s
 }
 
 func (s *probeMetricSet) registerFamily(family, valueType string) error {
@@ -401,29 +401,67 @@ func (s *probeMetricSet) registerFamily(family, valueType string) error {
 	return nil
 }
 
-func (s *probeMetricSet) writeUntyped(w io.Writer) {
-	untyped := make([]untypedMetric, 0, len(s.untyped))
-	for _, m := range s.untyped {
-		untyped = append(untyped, m)
+func (s *probeMetricSet) WritePrometheus(w io.Writer) {
+	probeMetrics := make([]probeMetric, 0, len(s.metrics))
+	for _, m := range s.metrics {
+		probeMetrics = append(probeMetrics, m)
 	}
-	sort.Slice(untyped, func(i, j int) bool {
-		if untyped[i].family != untyped[j].family {
-			return untyped[i].family < untyped[j].family
+	sort.Slice(probeMetrics, func(i, j int) bool {
+		if probeMetrics[i].family != probeMetrics[j].family {
+			return probeMetrics[i].family < probeMetrics[j].family
 		}
-		return untyped[i].name < untyped[j].name
+		return probeMetrics[i].name < probeMetrics[j].name
 	})
 	previousFamily := ""
-	for _, m := range untyped {
+	for _, m := range probeMetrics {
 		if m.family != previousFamily {
-			metrics.WriteMetadataIfNeeded(w, m.name, valueTypeUntyped)
+			metrics.WriteMetadataIfNeeded(w, m.family, m.valueType)
 			previousFamily = m.family
 		}
-		if float64(int64(m.value)) == m.value {
-			fmt.Fprintf(w, "%s %d\n", m.name, int64(m.value))
+		fmt.Fprint(w, m.name, " ")
+		if m.valueType == valueTypeCounter {
+			fmt.Fprint(w, m.counterValue)
+		} else if float64(int64(m.floatValue)) == m.floatValue {
+			fmt.Fprint(w, int64(m.floatValue))
 		} else {
-			fmt.Fprintf(w, "%s %g\n", m.name, m.value)
+			fmt.Fprintf(w, "%g", m.floatValue)
 		}
+		if m.epochTimestamp != nil {
+			fmt.Fprint(w, " ", *m.epochTimestamp)
+		}
+		fmt.Fprintln(w)
 	}
+}
+
+func makeEpochTimestamp(ctx context.Context, query Query, value any) (*int64, error) {
+	if query == "" {
+		return nil, nil
+	}
+	result, err := jq(ctx, query, value, false)
+	if err != nil {
+		return nil, err
+	}
+
+	var timestamp int64
+	switch v := result.(type) {
+	case int:
+		timestamp = int64(v)
+	case int64:
+		timestamp = v
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < math.MinInt64 || v >= float64(math.MaxInt64) {
+			return nil, fmt.Errorf("timestamp %v is not an int64", v)
+		}
+		timestamp = int64(v)
+	case string:
+		timestamp, err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("timestamp %v is not an int64", result)
+	}
+	return &timestamp, nil
 }
 
 func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Metric) error {
@@ -450,6 +488,17 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 	if err != nil {
 		return err
 	}
+	epochTimestamp, err := makeEpochTimestamp(ctx, m.EpochTimestamp, value)
+	if err != nil {
+		slog.Error("failed to extract epoch timestamp for metric", "metric", metricName, "query", m.EpochTimestamp, "error", err)
+		epochTimestamp = nil
+	}
+	probeMetric := probeMetric{
+		family:         metricFamily,
+		name:           metricName,
+		valueType:      m.ValueType,
+		epochTimestamp: epochTimestamp,
+	}
 
 	switch m.ValueType {
 	case valueTypeCounter:
@@ -460,7 +509,7 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
 			return err
 		}
-		metricSet.GetOrCreateCounter(metricName).Set(counterValue)
+		probeMetric.counterValue = counterValue
 	case valueTypeGauge:
 		gaugeValue, err := asGaugeValue(v)
 		if err != nil {
@@ -469,7 +518,7 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
 			return err
 		}
-		metricSet.GetOrCreateGauge(metricName, nil).Set(gaugeValue)
+		probeMetric.floatValue = gaugeValue
 	case valueTypeUntyped:
 		untypedValue, err := asGaugeValue(v)
 		if err != nil {
@@ -478,14 +527,11 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
 			return err
 		}
-		metricSet.untyped[metricName] = untypedMetric{
-			family: metricFamily,
-			name:   metricName,
-			value:  untypedValue,
-		}
+		probeMetric.floatValue = untypedValue
 	default:
 		return fmt.Errorf("valueType %s is not supported", m.ValueType)
 	}
+	metricSet.metrics[metricName] = probeMetric
 	return nil
 }
 
@@ -536,11 +582,12 @@ type Module struct {
 }
 
 type Metric struct {
-	Query     Query            `json:"query" yaml:"query"` // optional
-	Name      Query            `json:"name" yaml:"name"`
-	Labels    map[string]Query `json:"labels" yaml:"labels"`
-	ValueType string           `json:"valueType" yaml:"valueType"` // "counter", "gauge", "untyped" (default)
-	Value     Query            `json:"value" yaml:"value"`
+	Query          Query            `json:"query" yaml:"query"` // optional
+	Name           Query            `json:"name" yaml:"name"`
+	Labels         map[string]Query `json:"labels" yaml:"labels"`
+	ValueType      string           `json:"valueType" yaml:"valueType"` // "counter", "gauge", "untyped" (default)
+	Value          Query            `json:"value" yaml:"value"`
+	EpochTimestamp Query            `json:"epochTimestamp" yaml:"epochTimestamp"` // optional, Unix milliseconds
 }
 
 type Query = string

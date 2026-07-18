@@ -52,6 +52,19 @@ When `valid_status_codes` is omitted or empty, only 2xx responses are accepted. 
 
 Each metric accepts `valueType: counter`, `valueType: gauge`, or `valueType: untyped`. When `valueType` is omitted, it defaults to `untyped`. Prefer `counter` or `gauge` when the source metric's semantics are known.
 
+Set `epochTimestamp` to a jq expression to use a value from each metric object as the sample timestamp. The value must be an integer Unix timestamp in milliseconds:
+
+```yaml
+metrics:
+  - name: example_timestamped_value
+    query: '.values'
+    valueType: gauge
+    value: '.count'
+    epochTimestamp: '.timestamp'
+```
+
+If the timestamp expression cannot be evaluated or does not produce an integer, the sample is exposed without a timestamp and the error is logged. Explicit timestamps change Prometheus staleness handling; see the [Prometheus staleness documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/#staleness) before enabling them.
+
 ```
 $ prometheus-jq-exporter --config ./testdata/config.yaml
 ```
