@@ -6,12 +6,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/johejo/prometheus-jq-exporter/internal/diff"
 )
 
 func Test(t *testing.T) {
@@ -100,9 +100,47 @@ func testReq(method string, target string, body io.Reader, handler http.Handler)
 
 func assert[T any](t *testing.T, want T, got T) {
 	t.Helper()
-	if !reflect.DeepEqual(want, got) {
-		t.Error(string(diff.Diff("want", []byte(fmt.Sprint(want)), "got", []byte(fmt.Sprint(got)))))
+	if reflect.DeepEqual(want, got) {
+		return
 	}
+
+	wantText := fmt.Sprint(want)
+	gotText := fmt.Sprint(got)
+	if wantText == gotText {
+		t.Errorf("values differ but their textual representations are identical:\nwant (%T): %#v\ngot  (%T): %#v", want, want, got, got)
+		return
+	}
+
+	var commands [][]string
+	if gitPath, err := exec.LookPath("git"); err == nil {
+		commands = append(commands, []string{gitPath, "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--", "want", "got"})
+	}
+	if diffPath, err := exec.LookPath("diff"); err == nil {
+		commands = append(commands, []string{diffPath, "-u", "--label", "want", "--label", "got", "want", "got"})
+	}
+	if len(commands) == 0 {
+		t.Error("values differ; git and diff are unavailable")
+		return
+	}
+
+	dir := t.TempDir()
+	for name, text := range map[string]string{"want": wantText, "got": gotText} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatalf("write %s for diff: %v", name, err)
+		}
+	}
+
+	for _, command := range commands {
+		cmd := exec.Command(command[0], command[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			_, _ = t.Output().Write(out)
+			t.Fail()
+			return
+		}
+	}
+	t.Error("values differ; failed to generate diff")
 }
 
 func must[T any](t *testing.T) func(T, error) T {
