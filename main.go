@@ -602,7 +602,8 @@ func (s *probeMetricSet) WritePrometheus(w io.Writer) {
 		fmt.Fprint(w, m.name, " ")
 		if m.valueType == valueTypeCounter {
 			fmt.Fprint(w, m.counterValue)
-		} else if float64(int64(m.floatValue)) == m.floatValue {
+		} else if math.Trunc(m.floatValue) == m.floatValue &&
+			m.floatValue >= math.MinInt64 && m.floatValue < float64(math.MaxInt64) {
 			fmt.Fprint(w, int64(m.floatValue))
 		} else {
 			fmt.Fprintf(w, "%g", m.floatValue)

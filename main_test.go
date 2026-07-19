@@ -989,6 +989,52 @@ func TestCompileConfigPreservesLiteralFallback(t *testing.T) {
 	assert(t, "probe_value{kind=\"static\"} 1\n", output.String())
 }
 
+func TestProbeMetricFloatValueFormatting(t *testing.T) {
+	tests := map[string]struct {
+		value     float64
+		valueType string
+		want      string
+	}{
+		"gauge at two to the power of 63": {
+			value:     math.Exp2(63),
+			valueType: valueTypeGauge,
+			want:      "probe_value{} 9.223372036854776e+18\n",
+		},
+		"untyped at two to the power of 63": {
+			value:     math.Exp2(63),
+			valueType: valueTypeUntyped,
+			want:      "probe_value{} 9.223372036854776e+18\n",
+		},
+		"largest float below two to the power of 63": {
+			value:     math.Nextafter(math.Exp2(63), 0),
+			valueType: valueTypeGauge,
+			want:      "probe_value{} 9223372036854774784\n",
+		},
+		"minimum int64": {
+			value:     math.MinInt64,
+			valueType: valueTypeGauge,
+			want:      "probe_value{} -9223372036854775808\n",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			metricSet := newProbeMetricSet()
+			metricSet.metrics["probe_value{}"] = probeMetric{
+				family:     "probe_value",
+				name:       "probe_value{}",
+				valueType:  test.valueType,
+				floatValue: test.value,
+			}
+
+			metrics.ExposeMetadata(false)
+			var output strings.Builder
+			metricSet.WritePrometheus(&output)
+			assert(t, test.want, output.String())
+		})
+	}
+}
+
 func TestCompiledNameAndLabelDoNotFallbackAfterEvaluationErrors(t *testing.T) {
 	tests := map[string]Metric{
 		"name": {
