@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,13 +20,128 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/itchyny/gojq"
 )
 
+func TestHTTPResourceLimits(t *testing.T) {
+	assert(t, defaultMaxResponseBodySize, *maxResponseBodySize)
+	assert(t, defaultTargetTimeout, *targetTimeout)
+	assert(t, defaultReadHeaderTimeout, *readHeaderTimeout)
+
+	clientTimeout := 250 * time.Millisecond
+	client := newHTTPClient(false, false, clientTimeout)
+	assert(t, clientTimeout, client.Timeout)
+
+	serverTimeout := 750 * time.Millisecond
+	handler := http.NotFoundHandler()
+	server := newHTTPServer("127.0.0.1:0", handler, serverTimeout)
+	assert(t, "127.0.0.1:0", server.Addr)
+	if server.Handler == nil {
+		t.Fatal("HTTP server handler is nil")
+	}
+	assert(t, serverTimeout, server.ReadHeaderTimeout)
+}
+
+func TestValidateHTTPLimits(t *testing.T) {
+	if err := validateHTTPLimits(defaultMaxResponseBodySize, defaultTargetTimeout, defaultReadHeaderTimeout); err != nil {
+		t.Fatalf("valid defaults were rejected: %v", err)
+	}
+	tests := map[string]struct {
+		maxResponseBodySize int64
+		targetTimeout       time.Duration
+		readHeaderTimeout   time.Duration
+		want                string
+	}{
+		"zero response body size":      {0, defaultTargetTimeout, defaultReadHeaderTimeout, "max-response-body-size"},
+		"negative response body size":  {-1, defaultTargetTimeout, defaultReadHeaderTimeout, "max-response-body-size"},
+		"zero target timeout":          {defaultMaxResponseBodySize, 0, defaultReadHeaderTimeout, "target-timeout"},
+		"negative target timeout":      {defaultMaxResponseBodySize, -1, defaultReadHeaderTimeout, "target-timeout"},
+		"zero read header timeout":     {defaultMaxResponseBodySize, defaultTargetTimeout, 0, "read-header-timeout"},
+		"negative read header timeout": {defaultMaxResponseBodySize, defaultTargetTimeout, -1, "read-header-timeout"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateHTTPLimits(test.maxResponseBodySize, test.targetTimeout, test.readHeaderTimeout)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %s error, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestReadResponseBodyLimit(t *testing.T) {
+	for name, test := range map[string]struct {
+		body    string
+		maxSize int64
+		want    string
+		wantErr string
+	}{
+		"below limit":   {body: "ab", maxSize: 3, want: "ab"},
+		"at limit":      {body: "abc", maxSize: 3, want: "abc"},
+		"over limit":    {body: "abcd", maxSize: 3, wantErr: "exceeds 3 bytes"},
+		"invalid limit": {body: "", maxSize: 0, wantErr: "must be positive"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := readResponseBody(strings.NewReader(test.body), test.maxSize)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected %q error, got %v", test.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert(t, test.want, string(body))
+		})
+	}
+}
+
+func TestProbeResponseBodyLimit(t *testing.T) {
+	const response = `{"value":1}`
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, response)
+	}))
+	t.Cleanup(target.Close)
+
+	cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {}}})
+	query := "/probe?module=test&debug=true&target=" + url.QueryEscape(target.URL)
+	result := testReq(http.MethodGet, query, nil, handleProbe(cfg, http.DefaultClient, int64(len(response)-1)))
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	if !strings.Contains(body, "target response body exceeds 10 bytes") {
+		t.Fatalf("debug response does not contain response size error: %q", body)
+	}
+	if !strings.HasSuffix(body, probeStatus(0, 1, 0, 0, 0, 0)) {
+		t.Fatalf("response size error was not recorded as a fetch error: %q", body)
+	}
+}
+
+func TestProbeTargetTimeout(t *testing.T) {
+	client := newHTTPClient(false, false, 10*time.Millisecond)
+	client.Transport = RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+
+	cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {}}})
+	result := testReq(http.MethodGet, "/probe?module=test&target=http://example.test", nil, handleProbe(cfg, client, defaultMaxResponseBodySize))
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	assert(t, probeStatus(0, 1, 0, 0, 0, 0), body)
+
+	req := must[*http.Request](t)(http.NewRequest(http.MethodGet, "http://example.test", nil))
+	_, err := client.Do(req)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+}
+
 func Test(t *testing.T) {
-	httpClient := newHTTPClient(true, true)
+	httpClient := newHTTPClient(true, true, defaultTargetTimeout)
 
 	cfg, err := loadConfig("./testdata/config.yaml", false)
 	if err != nil {
@@ -45,7 +162,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
 tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 `)
 	t.Run("file", func(t *testing.T) {
-		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg, httpClient))
+		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg, httpClient, defaultMaxResponseBodySize))
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -57,7 +174,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		t.Cleanup(ts.Close)
 
 		target := fmt.Sprintf("/probe?module=tailscale&target=%s/tailscale-status.json", ts.URL)
-		result := testReq(http.MethodGet, target, nil, handleProbe(cfg, httpClient))
+		result := testReq(http.MethodGet, target, nil, handleProbe(cfg, httpClient, defaultMaxResponseBodySize))
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -72,7 +189,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		t.Cleanup(ts.Close)
 
 		target := fmt.Sprintf("/probe?module=tailscale&target=unix://%s/tailscale-status.json", testSock)
-		result := testReq(http.MethodGet, target, nil, handleProbe(cfg, httpClient))
+		result := testReq(http.MethodGet, target, nil, handleProbe(cfg, httpClient, defaultMaxResponseBodySize))
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -111,7 +228,7 @@ func TestUnixTransportReusesConnections(t *testing.T) {
 
 	first := newUnixServer("first")
 	second := newUnixServer("second")
-	client := newHTTPClient(false, true)
+	client := newHTTPClient(false, true, defaultTargetTimeout)
 	t.Cleanup(client.CloseIdleConnections)
 	request := func(target string) string {
 		t.Helper()
@@ -145,7 +262,7 @@ func TestUnixTransportRootAndDefaultHost(t *testing.T) {
 	server.Start()
 	t.Cleanup(server.Close)
 
-	client := newHTTPClient(false, true)
+	client := newHTTPClient(false, true, defaultTargetTimeout)
 	t.Cleanup(client.CloseIdleConnections)
 	req := must[*http.Request](t)(http.NewRequest(http.MethodGet, "unix://"+testSock+"?format=json", nil))
 	originalURL := req.URL.String()
@@ -162,7 +279,7 @@ func TestUnixTransportDoesNotHijackHTTP(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := newHTTPClient(false, true)
+	client := newHTTPClient(false, true, defaultTargetTimeout)
 	t.Cleanup(client.CloseIdleConnections)
 	resp := must[*http.Response](t)(client.Get(server.URL + "/assets/remote.sock/status?format=json"))
 	defer resp.Body.Close()
@@ -171,7 +288,7 @@ func TestUnixTransportDoesNotHijackHTTP(t *testing.T) {
 }
 
 func TestUnixTransportRejectsInvalidURLs(t *testing.T) {
-	client := newHTTPClient(false, true)
+	client := newHTTPClient(false, true, defaultTargetTimeout)
 	t.Cleanup(client.CloseIdleConnections)
 	for _, target := range []string{
 		"unix://host/path.sock/status",
@@ -187,7 +304,7 @@ func TestUnixTransportRejectsInvalidURLs(t *testing.T) {
 }
 
 func TestUnixTransportMustBeEnabled(t *testing.T) {
-	client := newHTTPClient(false, false)
+	client := newHTTPClient(false, false, defaultTargetTimeout)
 	_, err := client.Get("unix:///path/to/target.sock")
 	if err == nil || !strings.Contains(err.Error(), `unsupported protocol scheme "unix"`) {
 		t.Fatalf("expected unsupported protocol scheme error, got %v", err)
@@ -236,7 +353,7 @@ func TestProbeMetricsAreRequestScoped(t *testing.T) {
 	}))
 	t.Cleanup(target.Close)
 
-	probe := handleProbe(mustCompileConfig(t, cfg), http.DefaultClient)
+	probe := handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize)
 	type requestResult struct {
 		statusCode int
 		body       string
@@ -354,7 +471,7 @@ func TestProbeEscapesLabelValues(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, trim(`
@@ -411,7 +528,7 @@ func TestProbeErrorStatus(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg), http.DefaultClient))
+			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg), http.DefaultClient, defaultMaxResponseBodySize))
 			assert(t, test.want, result.StatusCode)
 			if test.wantBody != "" {
 				body := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -486,7 +603,7 @@ func TestProbeBody(t *testing.T) {
 				"name":   {"quote\"line\nbreak"},
 				"tag":    {"a", "b"},
 			}
-			result := testReq(http.MethodGet, "/probe?"+params.Encode(), nil, handleProbe(cfg, http.DefaultClient))
+			result := testReq(http.MethodGet, "/probe?"+params.Encode(), nil, handleProbe(cfg, http.DefaultClient, defaultMaxResponseBodySize))
 			assert(t, http.StatusOK, result.StatusCode)
 			assert(t, test.wantBody, gotBody)
 			assert(t, test.wantContentType, gotContentType)
@@ -513,7 +630,7 @@ func TestProbeRejectsInvalidBodyResults(t *testing.T) {
 
 			cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {Body: body}}})
 			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-			result := testReq(http.MethodGet, query, nil, handleProbe(cfg, http.DefaultClient))
+			result := testReq(http.MethodGet, query, nil, handleProbe(cfg, http.DefaultClient, defaultMaxResponseBodySize))
 			assert(t, http.StatusOK, result.StatusCode)
 			probeBody := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			assert(t, probeStatus(1, 0, 0, 0, 0, 0), probeBody)
@@ -627,7 +744,7 @@ probe_timestamp_errors 0
 				"test": {Metrics: test.metrics},
 			}}
 			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
+			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 			assert(t, test.wantStatus, result.StatusCode)
 			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			assert(t, test.wantBody, body)
@@ -645,7 +762,7 @@ func TestProbeRejectsDynamicReservedMetricName(t *testing.T) {
 		"test": {Metrics: []Metric{{Name: ".name", ValueType: valueTypeGauge, Value: ".value"}}},
 	}}
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, probeStatus(0, 0, 1, 0, 0, 0), body)
@@ -653,7 +770,7 @@ func TestProbeRejectsDynamicReservedMetricName(t *testing.T) {
 
 func TestProbeDebugIncludesError(t *testing.T) {
 	cfg := &Config{Modules: map[string]Module{"test": {}}}
-	result := testReq(http.MethodGet, "/probe?module=test&debug=true&target=%3A%2F%2F", nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
+	result := testReq(http.MethodGet, "/probe?module=test&debug=true&target=%3A%2F%2F", nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	if !strings.Contains(body, `# probe_error "parse \"://\": missing protocol scheme"`+"\n") {
@@ -726,7 +843,7 @@ func TestProductionFlagsExpandEnvAndDefaultMetadata(t *testing.T) {
 	t.Cleanup(target.Close)
 	t.Cleanup(func() { metrics.ExposeMetadata(false) })
 
-	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata, http.DefaultClient))
+	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata, http.DefaultClient, defaultMaxResponseBodySize))
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
 	result := testReq(http.MethodGet, query, nil, handler)
 	assert(t, http.StatusOK, result.StatusCode)
@@ -805,7 +922,7 @@ func TestProbeValidStatusCodes(t *testing.T) {
 			}}
 			probeTarget := fmt.Sprintf("%s?status=%d", target.URL, test.status)
 			query := "/probe?module=test&target=" + url.QueryEscape(probeTarget)
-			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
+			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 			assert(t, test.want, result.StatusCode)
 			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			fetchErrors := 0
@@ -1151,7 +1268,7 @@ func TestProbeEpochTimestampPerValue(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, trim(`

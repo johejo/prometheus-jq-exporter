@@ -33,8 +33,16 @@ Usage of prometheus-jq-exporter:
         expose metric metadata (default true)
   -log-level string
         log level (default "info")
+  -max-response-body-size int
+        maximum target response body size in bytes (default 10485760)
+  -read-header-timeout duration
+        HTTP server request header read timeout (default 5s)
+  -target-timeout duration
+        target request timeout (default 30s)
 
 ```
+
+Target responses are limited to 10 MiB by default, and the complete target request—including reading its response body—must finish within 30 seconds. Incoming request headers must be received within 5 seconds. Use the corresponding flags to tune these limits; all values must be positive.
 
 ## Example
 
@@ -114,7 +122,7 @@ Every completed probe returns HTTP 200 and exposes the following gauges:
 
 - `probe_success`: `1` only when every probe stage succeeds; otherwise `0`.
 - `probe_body_errors`: request body evaluation errors.
-- `probe_fetch_errors`: target request, accepted status, response read, or JSON decoding errors.
+- `probe_fetch_errors`: target request timeout, accepted status, response size/read, or JSON decoding errors.
 - `probe_metrics_successful`: successfully generated samples.
 - `probe_metrics_failed`: metric query or sample generation errors.
 - `probe_timestamp_errors`: timestamp evaluation or conversion errors. The corresponding sample is still exposed without a timestamp.

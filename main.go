@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/goccy/go-yaml"
@@ -35,9 +36,16 @@ var (
 	exposeMetadata            = flag.Bool("expose-metadata", true, "expose metric metadata")
 	enableFileTransport       = flag.Bool("enable-file-transport", false, "enable file transport")
 	enableUnixSocketTransport = flag.Bool("enable-unix-socket-transport", false, "enable unix socket transport")
+	maxResponseBodySize       = flag.Int64("max-response-body-size", defaultMaxResponseBodySize, "maximum target response body size in bytes")
+	targetTimeout             = flag.Duration("target-timeout", defaultTargetTimeout, "target request timeout")
+	readHeaderTimeout         = flag.Duration("read-header-timeout", defaultReadHeaderTimeout, "HTTP server request header read timeout")
 )
 
 const (
+	defaultMaxResponseBodySize int64 = 10 << 20
+	defaultTargetTimeout             = 30 * time.Second
+	defaultReadHeaderTimeout         = 5 * time.Second
+
 	valueTypeCounter             = "counter"
 	valueTypeGauge               = "gauge"
 	valueTypeUntyped             = "untyped"
@@ -63,17 +71,43 @@ func main() {
 
 	initLogger(*loglevel)
 
-	httpClient := newHTTPClient(*enableFileTransport, *enableUnixSocketTransport)
-	handler, err := newHandler(*config, *expandEnv, *exposeMetadata, httpClient)
+	if err := validateHTTPLimits(*maxResponseBodySize, *targetTimeout, *readHeaderTimeout); err != nil {
+		log.Fatal(err)
+	}
+
+	httpClient := newHTTPClient(*enableFileTransport, *enableUnixSocketTransport, *targetTimeout)
+	handler, err := newHandler(*config, *expandEnv, *exposeMetadata, httpClient, *maxResponseBodySize)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	slog.Info("listening", "addr", *addr)
-	log.Fatal(http.ListenAndServe(*addr, handler))
+	server := newHTTPServer(*addr, handler, *readHeaderTimeout)
+	log.Fatal(server.ListenAndServe())
 }
 
-func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.Client) (http.Handler, error) {
+func validateHTTPLimits(maxResponseBodySize int64, targetTimeout, readHeaderTimeout time.Duration) error {
+	if maxResponseBodySize <= 0 {
+		return fmt.Errorf("max-response-body-size must be positive")
+	}
+	if targetTimeout <= 0 {
+		return fmt.Errorf("target-timeout must be positive")
+	}
+	if readHeaderTimeout <= 0 {
+		return fmt.Errorf("read-header-timeout must be positive")
+	}
+	return nil
+}
+
+func newHTTPServer(addr string, handler http.Handler, readHeaderTimeout time.Duration) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+	}
+}
+
+func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.Client, maxResponseBodySize int64) (http.Handler, error) {
 	cfg, err := loadConfig(config, expandEnv)
 	if err != nil {
 		return nil, err
@@ -82,7 +116,7 @@ func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.
 	metrics.ExposeMetadata(exposeMetadata)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /metrics", handleMetrics)
-	mux.HandleFunc("GET /probe", handleProbe(cfg, httpClient))
+	mux.HandleFunc("GET /probe", handleProbe(cfg, httpClient, maxResponseBodySize))
 	return mux, nil
 }
 
@@ -108,7 +142,7 @@ func jq(ctx context.Context, query compiledQuery, value any) (any, error) {
 	return result, nil
 }
 
-func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool) *http.Client {
+func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool, timeout time.Duration) *http.Client {
 	defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
 
 	if enableFileTransport {
@@ -131,6 +165,7 @@ func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool) *http.Cl
 
 	return &http.Client{
 		Transport: transport,
+		Timeout:   timeout,
 	}
 }
 
@@ -325,7 +360,7 @@ func asLabelValue(value any) string {
 	return labelValue
 }
 
-func doHTTP(ctx context.Context, httpClient *http.Client, method string, target string, headers map[string]string, body io.Reader, bodyContentType string, validStatusCodes []int) (any, error) {
+func doHTTP(ctx context.Context, httpClient *http.Client, method string, target string, headers map[string]string, body io.Reader, bodyContentType string, validStatusCodes []int, maxResponseBodySize int64) (any, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
@@ -350,7 +385,7 @@ func doHTTP(ctx context.Context, httpClient *http.Client, method string, target 
 		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
 	}
 
-	b, err := io.ReadAll(resp.Body)
+	b, err := readResponseBody(resp.Body, maxResponseBodySize)
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +395,23 @@ func doHTTP(ctx context.Context, httpClient *http.Client, method string, target 
 		return nil, fmt.Errorf("%s: %w", string(b), err)
 	}
 	return respBodyJSON, nil
+}
+
+func readResponseBody(r io.Reader, maxSize int64) ([]byte, error) {
+	if maxSize <= 0 {
+		return nil, fmt.Errorf("maximum response body size must be positive")
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxSize))
+	if err != nil {
+		return nil, err
+	}
+	var extra [1]byte
+	if n, err := io.ReadFull(r, extra[:]); n > 0 {
+		return nil, fmt.Errorf("target response body exceeds %d bytes", maxSize)
+	} else if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return b, nil
 }
 
 func makeBody(ctx context.Context, params map[string][]string, body Body) (io.Reader, string, error) {
@@ -427,7 +479,7 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics.WriteProcessMetrics(w)
 }
 
-func handleProbe(cfg *Config, httpClient *http.Client) http.HandlerFunc {
+func handleProbe(cfg *Config, httpClient *http.Client, maxResponseBodySize int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		ctx := r.Context()
@@ -475,7 +527,7 @@ func handleProbe(cfg *Config, httpClient *http.Client) http.HandlerFunc {
 			return
 		}
 		var bodyJSON any
-		bodyJSON, err = doHTTP(ctx, httpClient, method, target, mod.Headers, body, bodyContentType, mod.ValidStatusCodes)
+		bodyJSON, err = doHTTP(ctx, httpClient, method, target, mod.Headers, body, bodyContentType, mod.ValidStatusCodes, maxResponseBodySize)
 		if err != nil {
 			slog.Error(err.Error())
 			metricSet.recordFetchError(err)
