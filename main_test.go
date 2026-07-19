@@ -122,22 +122,34 @@ func TestProbeMetricsAreRequestScoped(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	probe := handleProbe(mustCompileConfig(t, cfg))
-	request := func(path string) string {
-		t.Helper()
+	type requestResult struct {
+		statusCode int
+		body       string
+		err        error
+	}
+	request := func(path string) requestResult {
 		query := "/probe?module=test&target=" + url.QueryEscape(target.URL+path)
 		result := testReq(http.MethodGet, query, nil, probe)
-		assert(t, http.StatusOK, result.StatusCode)
-		return string(must[[]byte](t)(io.ReadAll(result.Body)))
+		body, err := io.ReadAll(result.Body)
+		return requestResult{statusCode: result.StatusCode, body: string(body), err: err}
+	}
+	checkRequest := func(path string, result requestResult) string {
+		t.Helper()
+		if result.err != nil {
+			t.Fatalf("read response from %s: %v", path, result.err)
+		}
+		assert(t, http.StatusOK, result.statusCode)
+		return result.body
 	}
 
 	metricNamesBefore := strings.Join(metrics.ListMetricNames(), "\n")
-	first := request("/first")
+	first := checkRequest("/first", request("/first"))
 	assert(t, trim(`
 probe_value{id="a"} 1
 probe_value{id="b"} 2
 `), first)
 
-	second := request("/second")
+	second := checkRequest("/second", request("/second"))
 	assert(t, trim(`
 probe_value{id="a"} 10
 `), second)
@@ -146,7 +158,7 @@ probe_value{id="a"} 10
 	t.Run("concurrent targets", func(t *testing.T) {
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		results := make([]string, 2)
+		results := make([]requestResult, 2)
 		paths := []string{"/second", "/third"}
 		for i := range paths {
 			wg.Add(1)
@@ -161,10 +173,10 @@ probe_value{id="a"} 10
 
 		assert(t, trim(`
 probe_value{id="a"} 10
-`), results[0])
+`), checkRequest(paths[0], results[0]))
 		assert(t, trim(`
 probe_value{id="c"} 30
-`), results[1])
+`), checkRequest(paths[1], results[1]))
 	})
 }
 
