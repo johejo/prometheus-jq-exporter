@@ -166,25 +166,43 @@ type unixSupportTransport struct {
 }
 
 func (t *unixSupportTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if strings.Contains(r.URL.Path, ".sock") {
-		parts := strings.Split(r.URL.Path, "/")
-		for i, part := range parts {
-			if i != len(parts)-1 && strings.HasSuffix(part, ".sock") {
-				r = r.Clone(r.Context())
-				r.URL.Path = "/" + path.Join(parts[i+1:]...)
-				if r.Host == "" {
-					r.Host = r.URL.Host
-					if host := r.Header.Get("Host"); host != "" {
-						r.Host = host
-					}
-				}
-				socketPath := strings.Join(parts[0:i+1], "/")
-				r.URL.Host = base64.RawURLEncoding.EncodeToString([]byte(socketPath)) + ".unix"
-				return t.unixTransport.RoundTrip(r)
+	if r.URL.Scheme != "unix" {
+		return t.transport.RoundTrip(r)
+	}
+	if r.URL.Host != "" || !strings.HasPrefix(r.URL.Path, "/") {
+		return nil, fmt.Errorf("invalid unix socket URL: expected unix:///absolute/path.sock[/resource]")
+	}
+
+	parts := strings.Split(r.URL.Path, "/")
+	for i, part := range parts {
+		if !strings.HasSuffix(part, ".sock") {
+			continue
+		}
+
+		originalRequest := r
+		r = r.Clone(r.Context())
+		socketPath := strings.Join(parts[:i+1], "/")
+		resourcePath := "/"
+		if i+1 < len(parts) {
+			resourcePath += strings.Join(parts[i+1:], "/")
+		}
+		if r.Host == "" {
+			r.Host = r.Header.Get("Host")
+			if r.Host == "" {
+				r.Host = "localhost"
 			}
 		}
+		r.URL.Scheme = "http"
+		r.URL.Host = base64.RawURLEncoding.EncodeToString([]byte(socketPath)) + ".unix"
+		r.URL.Path = resourcePath
+		r.URL.RawPath = ""
+		resp, err := t.unixTransport.RoundTrip(r)
+		if resp != nil {
+			resp.Request = originalRequest
+		}
+		return resp, err
 	}
-	return t.transport.RoundTrip(r)
+	return nil, fmt.Errorf("invalid unix socket URL: path must contain a segment ending in .sock")
 }
 
 func (t *unixSupportTransport) CloseIdleConnections() {

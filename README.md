@@ -6,7 +6,7 @@ An alternative Prometheus exporter to [json_exporter](https://github.com/prometh
 
 - jq expression
 - file transport (`target=file://...`)
-- unix socket transport (`target=http:///path/to/target.sock`)
+- unix socket transport (`target=unix:///path/to/target.sock`)
 
 ## Install
 
@@ -37,6 +37,17 @@ Usage of prometheus-jq-exporter:
 ```
 
 ## Example
+
+### Unix socket transport
+
+Enable the Unix socket transport and use the `unix` scheme for the probe target:
+
+```
+$ prometheus-jq-exporter --enable-unix-socket-transport --config ./testdata/config.yaml
+$ curl 'localhost:9999/probe?module=tailscale&target=unix:///path/to/target.sock/status'
+```
+
+The socket path ends at the first path segment with a `.sock` suffix. Any remaining path is sent as the HTTP request path; when it is omitted, `/` is used. The former implicit `http:///path/to/target.sock` form is not supported.
 
 Each module can restrict the HTTP response status codes accepted from the target:
 
