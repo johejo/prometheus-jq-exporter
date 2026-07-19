@@ -70,7 +70,7 @@ func main() {
 	}
 
 	slog.Info("listening", "addr", *addr)
-	http.ListenAndServe(*addr, handler)
+	log.Fatal(http.ListenAndServe(*addr, handler))
 }
 
 func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.Client) (http.Handler, error) {
