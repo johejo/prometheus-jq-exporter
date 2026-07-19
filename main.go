@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -134,28 +135,61 @@ func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool) *http.Cl
 }
 
 func transportWithUnixSupport(transport *http.Transport) http.RoundTripper {
-	return RoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if strings.Contains(r.URL.Path, ".sock") {
-			parts := strings.Split(r.URL.Path, "/")
-			for i, part := range parts {
-				if i != len(parts)-1 && strings.HasSuffix(part, ".sock") {
-					r.URL.Path = "/" + path.Join(parts[i+1:]...)
-					if r.URL.Host == "" {
-						if host := r.Header.Get("Host"); host != "" {
-							r.URL.Host = host
-						}
+	unixTransport := transport.Clone()
+	unixTransport.Proxy = nil
+	dialer := &net.Dialer{}
+	unixTransport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		encodedPath, ok := strings.CutSuffix(host, ".unix")
+		if !ok {
+			return nil, fmt.Errorf("invalid unix socket address: %s", address)
+		}
+		socketPath, err := base64.RawURLEncoding.DecodeString(encodedPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid unix socket address %s: %w", address, err)
+		}
+		return dialer.DialContext(ctx, "unix", string(socketPath))
+	}
+
+	return &unixSupportTransport{
+		transport:     transport,
+		unixTransport: unixTransport,
+	}
+}
+
+type unixSupportTransport struct {
+	transport     *http.Transport
+	unixTransport *http.Transport
+}
+
+func (t *unixSupportTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.Contains(r.URL.Path, ".sock") {
+		parts := strings.Split(r.URL.Path, "/")
+		for i, part := range parts {
+			if i != len(parts)-1 && strings.HasSuffix(part, ".sock") {
+				r = r.Clone(r.Context())
+				r.URL.Path = "/" + path.Join(parts[i+1:]...)
+				if r.Host == "" {
+					r.Host = r.URL.Host
+					if host := r.Header.Get("Host"); host != "" {
+						r.Host = host
 					}
-					unixTransport := transport.Clone()
-					socketPath := strings.Join(parts[0:i+1], "/")
-					unixTransport.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
-						return net.Dial("unix", socketPath)
-					}
-					return unixTransport.RoundTrip(r)
 				}
+				socketPath := strings.Join(parts[0:i+1], "/")
+				r.URL.Host = base64.RawURLEncoding.EncodeToString([]byte(socketPath)) + ".unix"
+				return t.unixTransport.RoundTrip(r)
 			}
 		}
-		return transport.RoundTrip(r)
-	})
+	}
+	return t.transport.RoundTrip(r)
+}
+
+func (t *unixSupportTransport) CloseIdleConnections() {
+	t.transport.CloseIdleConnections()
+	t.unixTransport.CloseIdleConnections()
 }
 
 func initLogger(loglevel string) {

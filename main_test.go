@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/VictoriaMetrics/metrics"
@@ -77,6 +78,66 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
 		assert(t, want, b)
 	})
+}
+
+func TestUnixTransportReusesConnections(t *testing.T) {
+	type unixServer struct {
+		target      string
+		connections *atomic.Int64
+	}
+	newUnixServer := func(name string) unixServer {
+		t.Helper()
+		tempDir := must[string](t)(os.MkdirTemp("/tmp", "prometheus-jq-exporter-"))
+		t.Cleanup(func() { os.RemoveAll(tempDir) })
+		socketPath := filepath.Join(tempDir, name+".sock")
+		connections := &atomic.Int64{}
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "%s %s", r.Host, r.URL.Path)
+		}))
+		listener := must[net.Listener](t)(net.Listen("unix", socketPath))
+		server.Listener = &countingListener{Listener: listener, connections: connections}
+		server.Start()
+		t.Cleanup(server.Close)
+		return unixServer{
+			target:      "http://" + socketPath + "/status",
+			connections: connections,
+		}
+	}
+
+	first := newUnixServer("first")
+	second := newUnixServer("second")
+	client := newHTTPClient(false, true)
+	t.Cleanup(client.CloseIdleConnections)
+	request := func(target string) string {
+		t.Helper()
+		req := must[*http.Request](t)(http.NewRequest(http.MethodGet, target, nil))
+		req.Header.Set("Host", "unix.test")
+		originalURL := req.URL.String()
+		resp := must[*http.Response](t)(client.Do(req))
+		defer resp.Body.Close()
+		body := string(must[[]byte](t)(io.ReadAll(resp.Body)))
+		assert(t, originalURL, req.URL.String())
+		return body
+	}
+
+	assert(t, "unix.test /status", request(first.target))
+	assert(t, "unix.test /status", request(first.target))
+	assert(t, "unix.test /status", request(second.target))
+	assert(t, int64(1), first.connections.Load())
+	assert(t, int64(1), second.connections.Load())
+}
+
+type countingListener struct {
+	net.Listener
+	connections *atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.connections.Add(1)
+	}
+	return conn, err
 }
 
 func TestProbeMetricsAreRequestScoped(t *testing.T) {
