@@ -1,6 +1,6 @@
 # prometheus-jq-exporter
 
-An alternative promethus exporter to [json_exporter](github.com/prometheus-community/json_exporter) using [gojq](https://github.com/itchyny/gojq).
+An alternative Prometheus exporter to [json_exporter](https://github.com/prometheus-community/json_exporter) using [gojq](https://github.com/itchyny/gojq).
 
 ## Features
 
@@ -84,7 +84,7 @@ Only one of `body.json` and `body.text` can be specified. Each expression must p
 
 Each metric accepts `valueType: counter`, `valueType: gauge`, or `valueType: untyped`. When `valueType` is omitted, it defaults to `untyped`. Prefer `counter` or `gauge` when the source metric's semantics are known.
 
-Set `epochTimestamp` to a jq expression to use a value from each metric object as the sample timestamp. The value must be an integer Unix timestamp in milliseconds:
+Set `epochTimestamp` to a jq expression to use a value from each metric object as the sample timestamp. The value must be an integer Unix timestamp in milliseconds that fits in an `int64`. Integer-valued floats and base-10 integer strings are also accepted:
 
 ```yaml
 metrics:
@@ -95,18 +95,59 @@ metrics:
     epochTimestamp: '.timestamp'
 ```
 
-If the timestamp expression cannot be evaluated or does not produce an integer, the sample is exposed without a timestamp and the error is logged. Explicit timestamps change Prometheus staleness handling; see the [Prometheus staleness documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/#staleness) before enabling them.
+If the timestamp expression produces `null` or no value, the timestamp is treated as optional and the sample is exposed without one. If the expression cannot be evaluated or produces another unsupported value, the sample is exposed without a timestamp, the error is logged, and `probe_success` is set to `0`. Explicit timestamps change Prometheus staleness handling; see the [Prometheus staleness documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/#staleness) before enabling them.
+
+### Probe success
+
+Every completed probe returns HTTP 200 and exposes the following gauges:
+
+- `probe_success`: `1` only when every probe stage succeeds; otherwise `0`.
+- `probe_body_errors`: request body evaluation errors.
+- `probe_fetch_errors`: target request, accepted status, response read, or JSON decoding errors.
+- `probe_metrics_successful`: successfully generated samples.
+- `probe_metrics_failed`: metric query or sample generation errors.
+- `probe_timestamp_errors`: timestamp evaluation or conversion errors. The corresponding sample is still exposed without a timestamp.
+
+All error gauges and `probe_metrics_failed` are counts for the current probe, not cumulative counters. Metric generation is best-effort: valid samples are returned even when another query or sample fails. A partial failure has both `probe_metrics_successful > 0` and `probe_metrics_failed > 0`; an all-metric failure has no successful samples.
+
+This HTTP behavior is a compatibility change from versions that returned HTTP 500 for all-metric or body failures and HTTP 503 for fetch failures. Prometheus should alert on the probe gauges rather than the scrape status. To inspect error details without accessing exporter logs, add `debug=true` to the probe URL; errors are emitted as `# probe_error` comments before the metrics.
+
+Missing `module` or `target` parameters and unknown modules are request errors and return HTTP 400. Use `probe_success == 0` to alert on target or metric generation failures; the Prometheus `up` metric only indicates whether the exporter endpoint itself could be scraped.
+
+The probe gauge names listed above are reserved and cannot be used as configured metric family names.
 
 ```
 $ prometheus-jq-exporter --config ./testdata/config.yaml
 ```
 
 ```
-$ python3 -m http.server ./testdata
+$ python3 -m http.server -d ./testdata
 ```
 
 ```
 $ curl 'localhost:9999/probe?module=tailscale&target=http://localhost:8000/tailscale-status.json'
+# HELP probe_body_errors
+# TYPE probe_body_errors gauge
+probe_body_errors 0
+# HELP probe_fetch_errors
+# TYPE probe_fetch_errors gauge
+probe_fetch_errors 0
+# HELP probe_metrics_failed
+# TYPE probe_metrics_failed gauge
+probe_metrics_failed 0
+# HELP probe_metrics_successful
+# TYPE probe_metrics_successful gauge
+probe_metrics_successful 6
+# HELP probe_success
+# TYPE probe_success gauge
+probe_success 1
+# HELP probe_timestamp_errors
+# TYPE probe_timestamp_errors gauge
+probe_timestamp_errors 0
+# HELP tailscale_status_peer
+# TYPE tailscale_status_peer gauge
+tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
+tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
 # HELP tailscale_status_peer_rx_bytes
 # TYPE tailscale_status_peer_rx_bytes gauge
 tailscale_status_peer_rx_bytes{machine_name="testhostname"} 168365416
@@ -115,10 +156,6 @@ tailscale_status_peer_rx_bytes{machine_name="testhostname2"} 0
 # TYPE tailscale_status_peer_tx_bytes gauge
 tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
 tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
-# HELP tailscale_status_peer
-# TYPE tailscale_status_peer gauge
-tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
-tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
 ```
 
 ## License

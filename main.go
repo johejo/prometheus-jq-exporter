@@ -40,10 +40,25 @@ var (
 )
 
 const (
-	valueTypeCounter = "counter"
-	valueTypeGauge   = "gauge"
-	valueTypeUntyped = "untyped"
+	valueTypeCounter             = "counter"
+	valueTypeGauge               = "gauge"
+	valueTypeUntyped             = "untyped"
+	probeBodyErrorsMetric        = "probe_body_errors"
+	probeFetchErrorsMetric       = "probe_fetch_errors"
+	probeMetricsFailedMetric     = "probe_metrics_failed"
+	probeMetricsSuccessfulMetric = "probe_metrics_successful"
+	probeSuccessMetric           = "probe_success"
+	probeTimestampErrorsMetric   = "probe_timestamp_errors"
 )
+
+var reservedProbeMetrics = map[string]struct{}{
+	probeBodyErrorsMetric:        {},
+	probeFetchErrorsMetric:       {},
+	probeMetricsFailedMetric:     {},
+	probeMetricsSuccessfulMetric: {},
+	probeSuccessMetric:           {},
+	probeTimestampErrorsMetric:   {},
+}
 
 func main() {
 	flag.Parse()
@@ -388,23 +403,23 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 
 		slog.Debug("start probe", "module", module, "method", method, "target", target)
 
+		metricSet := newProbeMetricSet()
 		body, bodyContentType, err := makeBody(ctx, q, mod.Body)
 		if err != nil {
 			slog.Error(err.Error())
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			metricSet.recordBodyError(err)
+			metricSet.WriteProbeResult(w, q.Get("debug") == "true")
 			return
 		}
 		var bodyJSON any
 		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body, bodyContentType, mod.ValidStatusCodes)
 		if err != nil {
 			slog.Error(err.Error())
-			http.Error(w, "Failed to fetch JSON response. TARGET: "+target+", ERROR: "+err.Error(), http.StatusServiceUnavailable)
+			metricSet.recordFetchError(err)
+			metricSet.WriteProbeResult(w, q.Get("debug") == "true")
 			return
 		}
 
-		metricSet := newProbeMetricSet()
-		successfulMetrics := 0
-		metricErrors := 0
 		for metricIndex, m := range mod.Metrics {
 			var value any
 			if m.query == nil {
@@ -412,7 +427,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			} else {
 				value, err = jq(ctx, *m.query, bodyJSON)
 				if err != nil {
-					metricErrors++
+					metricSet.recordMetricError(err)
 					slog.Error("failed to query metric values", "metric_index", metricIndex, "metric", m.Name, "query", m.Query, "error", err)
 					continue
 				}
@@ -421,18 +436,13 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 
 			for valueIndex, value := range values {
 				if err := makeMetrics(ctx, metricSet, value, m); err != nil {
-					metricErrors++
+					metricSet.recordMetricError(err)
 					slog.Error("failed to make metric", "metric_index", metricIndex, "metric", m.Name, "value_index", valueIndex, "error", err)
 					continue
 				}
-				successfulMetrics++
 			}
 		}
-		if metricErrors > 0 && successfulMetrics == 0 {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
-		metricSet.WritePrometheus(w)
+		metricSet.WriteProbeResult(w, q.Get("debug") == "true")
 	}
 }
 
@@ -446,15 +456,77 @@ type probeMetric struct {
 }
 
 type probeMetricSet struct {
-	metrics     map[string]probeMetric
-	familyTypes map[string]string
+	metrics           map[string]probeMetric
+	familyTypes       map[string]string
+	success           bool
+	bodyErrors        int
+	fetchErrors       int
+	metricsFailed     int
+	metricsSuccessful int
+	timestampErrors   int
+	errors            []error
 }
 
 func newProbeMetricSet() *probeMetricSet {
 	return &probeMetricSet{
 		metrics:     make(map[string]probeMetric),
 		familyTypes: make(map[string]string),
+		success:     true,
 	}
+}
+
+func (s *probeMetricSet) recordError(err error) {
+	s.success = false
+	s.errors = append(s.errors, err)
+}
+
+func (s *probeMetricSet) recordBodyError(err error) {
+	s.bodyErrors++
+	s.recordError(err)
+}
+
+func (s *probeMetricSet) recordFetchError(err error) {
+	s.fetchErrors++
+	s.recordError(err)
+}
+
+func (s *probeMetricSet) recordMetricError(err error) {
+	s.metricsFailed++
+	s.recordError(err)
+}
+
+func (s *probeMetricSet) recordTimestampError(err error) {
+	s.timestampErrors++
+	s.recordError(err)
+}
+
+func (s *probeMetricSet) addGauge(name string, value float64) {
+	s.familyTypes[name] = valueTypeGauge
+	s.metrics[name] = probeMetric{
+		family:     name,
+		name:       name,
+		valueType:  valueTypeGauge,
+		floatValue: value,
+	}
+}
+
+func (s *probeMetricSet) WriteProbeResult(w io.Writer, debug ...bool) {
+	if len(debug) > 0 && debug[0] {
+		for _, err := range s.errors {
+			fmt.Fprintf(w, "# probe_error %q\n", err.Error())
+		}
+	}
+	s.addGauge(probeBodyErrorsMetric, float64(s.bodyErrors))
+	s.addGauge(probeFetchErrorsMetric, float64(s.fetchErrors))
+	s.addGauge(probeMetricsFailedMetric, float64(s.metricsFailed))
+	s.addGauge(probeMetricsSuccessfulMetric, float64(s.metricsSuccessful))
+	success := float64(0)
+	if s.success {
+		success = 1
+	}
+	s.addGauge(probeSuccessMetric, success)
+	s.addGauge(probeTimestampErrorsMetric, float64(s.timestampErrors))
+	s.WritePrometheus(w)
 }
 
 func (s *probeMetricSet) registerFamily(family, valueType string) error {
@@ -505,6 +577,9 @@ func makeEpochTimestamp(ctx context.Context, query *compiledQuery, value any) (*
 	if err != nil {
 		return nil, err
 	}
+	if result == nil {
+		return nil, nil
+	}
 
 	var timestamp int64
 	switch v := result.(type) {
@@ -547,6 +622,9 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		return fmt.Errorf("invalid metric %q: %w", metricName, err)
 	}
 	metricFamily := fmt.Sprint(nameResult)
+	if _, reserved := reservedProbeMetrics[metricFamily]; reserved {
+		return fmt.Errorf("metric family %q is reserved", metricFamily)
+	}
 
 	v, err := jq(ctx, m.value, value)
 	if err != nil {
@@ -555,6 +633,7 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 	epochTimestamp, err := makeEpochTimestamp(ctx, m.epochTimestamp, value)
 	if err != nil {
 		slog.Error("failed to extract epoch timestamp for metric", "metric", metricName, "query", m.epochTimestamp.source, "error", err)
+		metricSet.recordTimestampError(err)
 		epochTimestamp = nil
 	}
 	probeMetric := probeMetric{
@@ -596,6 +675,7 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		return fmt.Errorf("valueType %s is not supported", m.ValueType)
 	}
 	metricSet.metrics[metricName] = probeMetric
+	metricSet.metricsSuccessful++
 	return nil
 }
 
@@ -734,6 +814,9 @@ func compileMetric(compiler queryCompiler, metric Metric) (Metric, error) {
 	compiled.name, err = compiler.compile(metric.Name, true)
 	if err != nil {
 		return Metric{}, fmt.Errorf("name: %w", err)
+	}
+	if _, reserved := reservedProbeMetrics[compiled.name.source]; compiled.name.code == nil && reserved {
+		return Metric{}, fmt.Errorf("name: metric family %q is reserved", compiled.name.source)
 	}
 	for labelName, labelQuery := range metric.Labels {
 		compiledLabel, compileErr := compiler.compile(labelQuery, true)

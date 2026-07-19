@@ -34,6 +34,12 @@ func Test(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 6
+probe_success 1
+probe_timestamp_errors 0
 tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
 tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
 tailscale_status_peer_rx_bytes{machine_name="testhostname"} 168365416
@@ -130,12 +136,24 @@ func TestProbeMetricsAreRequestScoped(t *testing.T) {
 	metricNamesBefore := strings.Join(metrics.ListMetricNames(), "\n")
 	first := checkRequest("/first", request("/first"))
 	assert(t, trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 2
+probe_success 1
+probe_timestamp_errors 0
 probe_value{id="a"} 1
 probe_value{id="b"} 2
 `), first)
 
 	second := checkRequest("/second", request("/second"))
 	assert(t, trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 1
+probe_success 1
+probe_timestamp_errors 0
 probe_value{id="a"} 10
 `), second)
 	assert(t, metricNamesBefore, strings.Join(metrics.ListMetricNames(), "\n"))
@@ -157,9 +175,21 @@ probe_value{id="a"} 10
 		wg.Wait()
 
 		assert(t, trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 1
+probe_success 1
+probe_timestamp_errors 0
 probe_value{id="a"} 10
 `), checkRequest(paths[0], results[0]))
 		assert(t, trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 1
+probe_success 1
+probe_timestamp_errors 0
 probe_value{id="c"} 30
 `), checkRequest(paths[1], results[1]))
 	})
@@ -203,7 +233,15 @@ func TestProbeEscapesLabelValues(t *testing.T) {
 	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
-	assert(t, "probe_value{label=\"quote\\\"line\\nbreak\\\\\"} 1\n", body)
+	assert(t, trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 1
+probe_success 1
+probe_timestamp_errors 0
+probe_value{label="quote\"line\nbreak\\"} 1
+`), body)
 }
 
 func TestProbeErrorStatus(t *testing.T) {
@@ -213,9 +251,10 @@ func TestProbeErrorStatus(t *testing.T) {
 	t.Cleanup(invalidJSONTarget.Close)
 
 	tests := map[string]struct {
-		cfg    *Config
-		target string
-		want   int
+		cfg      *Config
+		target   string
+		want     int
+		wantBody string
 	}{
 		"missing module": {
 			cfg:    &Config{},
@@ -233,14 +272,16 @@ func TestProbeErrorStatus(t *testing.T) {
 			want:   http.StatusBadRequest,
 		},
 		"invalid target": {
-			cfg:    &Config{Modules: map[string]Module{"test": {}}},
-			target: "/probe?module=test&target=%3A%2F%2F",
-			want:   http.StatusServiceUnavailable,
+			cfg:      &Config{Modules: map[string]Module{"test": {}}},
+			target:   "/probe?module=test&target=%3A%2F%2F",
+			want:     http.StatusOK,
+			wantBody: probeStatus(0, 1, 0, 0, 0, 0),
 		},
 		"invalid JSON response": {
-			cfg:    &Config{Modules: map[string]Module{"test": {}}},
-			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
-			want:   http.StatusServiceUnavailable,
+			cfg:      &Config{Modules: map[string]Module{"test": {}}},
+			target:   "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
+			want:     http.StatusOK,
+			wantBody: probeStatus(0, 1, 0, 0, 0, 0),
 		},
 	}
 
@@ -248,6 +289,10 @@ func TestProbeErrorStatus(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg)))
 			assert(t, test.want, result.StatusCode)
+			if test.wantBody != "" {
+				body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+				assert(t, test.wantBody, body)
+			}
 		})
 	}
 }
@@ -334,7 +379,9 @@ func TestProbeRejectsInvalidBodyResults(t *testing.T) {
 			cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {Body: body}}})
 			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
 			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
-			assert(t, http.StatusInternalServerError, result.StatusCode)
+			assert(t, http.StatusOK, result.StatusCode)
+			probeBody := string(must[[]byte](t)(io.ReadAll(result.Body)))
+			assert(t, probeStatus(1, 0, 0, 0, 0, 0), probeBody)
 			if targetCalled {
 				t.Fatal("target was called after body evaluation failed")
 			}
@@ -356,7 +403,7 @@ func TestProbeMetricGenerationPartialFailure(t *testing.T) {
 				{Name: "successful_metric", ValueType: valueTypeGauge, Value: "2"},
 			},
 			wantStatus: http.StatusOK,
-			wantBody:   "successful_metric{} 2\n",
+			wantBody:   probeStatus(0, 0, 1, 1, 0, 0) + "successful_metric{} 2\n",
 		},
 		"value failure": {
 			body: `{"items":[{"id":"a","value":1},{"id":"b","value":"invalid"},{"id":"c","value":3}]}`,
@@ -371,6 +418,12 @@ func TestProbeMetricGenerationPartialFailure(t *testing.T) {
 			wantBody: trim(`
 item_value{id="a"} 1
 item_value{id="c"} 3
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 1
+probe_metrics_successful 2
+probe_success 0
+probe_timestamp_errors 0
 `),
 		},
 		"all values fail": {
@@ -381,8 +434,8 @@ item_value{id="c"} 3
 				ValueType: valueTypeGauge,
 				Value:     ".value",
 			}},
-			wantStatus: http.StatusInternalServerError,
-			wantBody:   "Internal Server Error\n",
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 1, 0, 0, 0),
 		},
 		"negative counter": {
 			body: `{"value":-1}`,
@@ -391,8 +444,8 @@ item_value{id="c"} 3
 				ValueType: valueTypeCounter,
 				Value:     ".value",
 			}},
-			wantStatus: http.StatusInternalServerError,
-			wantBody:   "Internal Server Error\n",
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 1, 0, 0, 0),
 		},
 		"null metric query": {
 			body: `{}`,
@@ -403,7 +456,7 @@ item_value{id="c"} 3
 				Value:     "1",
 			}},
 			wantStatus: http.StatusOK,
-			wantBody:   "null_input{} 1\n",
+			wantBody:   "null_input{} 1\n" + probeStatus(0, 0, 0, 1, 1, 0),
 		},
 		"empty values": {
 			body: `{"items":[]}`,
@@ -414,7 +467,7 @@ item_value{id="c"} 3
 				Value:     ".value",
 			}},
 			wantStatus: http.StatusOK,
-			wantBody:   "",
+			wantBody:   probeStatus(0, 0, 0, 0, 1, 0),
 		},
 	}
 
@@ -434,6 +487,35 @@ item_value{id="c"} 3
 			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			assert(t, test.wantBody, body)
 		})
+	}
+}
+
+func TestProbeRejectsDynamicReservedMetricName(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"name":"probe_success","value":1}`)
+	}))
+	t.Cleanup(target.Close)
+
+	cfg := &Config{Modules: map[string]Module{
+		"test": {Metrics: []Metric{{Name: ".name", ValueType: valueTypeGauge, Value: ".value"}}},
+	}}
+	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	assert(t, probeStatus(0, 0, 1, 0, 0, 0), body)
+}
+
+func TestProbeDebugIncludesError(t *testing.T) {
+	cfg := &Config{Modules: map[string]Module{"test": {}}}
+	result := testReq(http.MethodGet, "/probe?module=test&debug=true&target=%3A%2F%2F", nil, handleProbe(mustCompileConfig(t, cfg)))
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	if !strings.Contains(body, `# probe_error "parse \"://\": missing protocol scheme"`+"\n") {
+		t.Fatalf("debug response does not contain fetch error: %q", body)
+	}
+	if !strings.HasSuffix(body, probeStatus(0, 1, 0, 0, 0, 0)) {
+		t.Fatalf("debug response does not contain probe metrics: %q", body)
 	}
 }
 
@@ -486,6 +568,24 @@ func TestProductionFlagsExpandEnvAndDefaultMetadata(t *testing.T) {
 # HELP expanded_counter
 # TYPE expanded_counter counter
 expanded_counter{} 3
+# HELP probe_body_errors
+# TYPE probe_body_errors gauge
+probe_body_errors 0
+# HELP probe_fetch_errors
+# TYPE probe_fetch_errors gauge
+probe_fetch_errors 0
+# HELP probe_metrics_failed
+# TYPE probe_metrics_failed gauge
+probe_metrics_failed 0
+# HELP probe_metrics_successful
+# TYPE probe_metrics_successful gauge
+probe_metrics_successful 1
+# HELP probe_success
+# TYPE probe_success gauge
+probe_success 1
+# HELP probe_timestamp_errors
+# TYPE probe_timestamp_errors gauge
+probe_timestamp_errors 0
 `), body)
 }
 
@@ -501,29 +601,33 @@ func TestProbeValidStatusCodes(t *testing.T) {
 		status           int
 		validStatusCodes []int
 		want             int
+		wantSuccess      int
 	}{
 		"default accepts 2xx": {
-			status: 299,
-			want:   http.StatusOK,
+			status:      299,
+			want:        http.StatusOK,
+			wantSuccess: 1,
 		},
 		"empty list accepts 2xx": {
 			status:           http.StatusOK,
 			validStatusCodes: []int{},
 			want:             http.StatusOK,
+			wantSuccess:      1,
 		},
 		"default rejects non-2xx": {
 			status: http.StatusNotFound,
-			want:   http.StatusServiceUnavailable,
+			want:   http.StatusOK,
 		},
 		"configured accepts non-2xx": {
 			status:           http.StatusNotFound,
 			validStatusCodes: []int{http.StatusNotFound},
 			want:             http.StatusOK,
+			wantSuccess:      1,
 		},
 		"configured rejects unlisted 2xx": {
 			status:           http.StatusOK,
 			validStatusCodes: []int{http.StatusCreated},
-			want:             http.StatusServiceUnavailable,
+			want:             http.StatusOK,
 		},
 	}
 
@@ -536,6 +640,12 @@ func TestProbeValidStatusCodes(t *testing.T) {
 			query := "/probe?module=test&target=" + url.QueryEscape(probeTarget)
 			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
 			assert(t, test.want, result.StatusCode)
+			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+			fetchErrors := 0
+			if test.wantSuccess == 0 {
+				fetchErrors = 1
+			}
+			assert(t, probeStatus(0, fetchErrors, 0, 0, test.wantSuccess, 0), body)
 		})
 	}
 }
@@ -739,6 +849,24 @@ func TestCompileConfigRejectsInvalidQueries(t *testing.T) {
 	}
 }
 
+func TestCompileConfigRejectsReservedMetricName(t *testing.T) {
+	for metricName := range reservedProbeMetrics {
+		t.Run(metricName, func(t *testing.T) {
+			err := compileConfig(&Config{Modules: map[string]Module{
+				"test": {Metrics: []Metric{{Name: metricName, Value: "1"}}},
+			}})
+			if err == nil {
+				t.Fatal("expected reserved metric name error")
+			}
+			for _, part := range []string{`module "test"`, "metric 0", fmt.Sprintf(`metric family %q is reserved`, metricName)} {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q does not contain %q", err, part)
+				}
+			}
+		})
+	}
+}
+
 func TestCompileConfigPreservesLiteralFallback(t *testing.T) {
 	metric := mustCompileConfig(t, &Config{Modules: map[string]Module{
 		"test": {Metrics: []Metric{{
@@ -814,6 +942,12 @@ func TestProbeEpochTimestampPerValue(t *testing.T) {
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, trim(`
+probe_body_errors 0
+probe_fetch_errors 0
+probe_metrics_failed 0
+probe_metrics_successful 3
+probe_success 1
+probe_timestamp_errors 0
 probe_value{id="a"} 1 1712345678901
 probe_value{id="b"} 2 1712345678902
 probe_value{id="c"} 3
@@ -848,7 +982,6 @@ func TestMakeMetricsEpochTimestampFallback(t *testing.T) {
 		value any
 	}{
 		"query evaluation error": {query: `error("failed")`, value: map[string]any{"timestamp": 1}},
-		"missing value":          {query: ".timestamp", value: map[string]any{}},
 		"fractional value": {
 			query: ".timestamp",
 			value: map[string]any{"timestamp": 1.5},
@@ -874,8 +1007,38 @@ func TestMakeMetricsEpochTimestampFallback(t *testing.T) {
 
 			metrics.ExposeMetadata(false)
 			var output strings.Builder
-			metricSet.WritePrometheus(&output)
-			assert(t, "probe_value{} 1\n", output.String())
+			metricSet.WriteProbeResult(&output)
+			assert(t, probeStatus(0, 0, 0, 1, 0, 1)+"probe_value{} 1\n", output.String())
+		})
+	}
+}
+
+func TestMakeMetricsEpochTimestampOptional(t *testing.T) {
+	tests := map[string]struct {
+		query Query
+		value any
+	}{
+		"null":      {query: ".timestamp", value: map[string]any{"timestamp": nil}},
+		"missing":   {query: ".timestamp", value: map[string]any{}},
+		"no result": {query: ".timestamp // empty", value: map[string]any{}},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			metricSet := newProbeMetricSet()
+			err := makeMetrics(t.Context(), metricSet, test.value, mustCompileMetric(t, Metric{
+				Name:           "probe_value",
+				ValueType:      valueTypeGauge,
+				Value:          "1",
+				EpochTimestamp: test.query,
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			metrics.ExposeMetadata(false)
+			var output strings.Builder
+			metricSet.WriteProbeResult(&output)
+			assert(t, probeStatus(0, 0, 0, 1, 1, 0)+"probe_value{} 1\n", output.String())
 		})
 	}
 }
@@ -982,6 +1145,16 @@ func TestMakeMetricsRejectsInvalidNames(t *testing.T) {
 
 func trim(s string) string {
 	return strings.TrimPrefix(s, "\n")
+}
+
+func probeStatus(bodyErrors, fetchErrors, metricsFailed, metricsSuccessful, success, timestampErrors int) string {
+	return fmt.Sprintf(`probe_body_errors %d
+probe_fetch_errors %d
+probe_metrics_failed %d
+probe_metrics_successful %d
+probe_success %d
+probe_timestamp_errors %d
+`, bodyErrors, fetchErrors, metricsFailed, metricsSuccessful, success, timestampErrors)
 }
 
 func mustCompileConfig(t *testing.T, cfg *Config) *Config {
