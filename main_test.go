@@ -371,9 +371,19 @@ func TestProbeBody(t *testing.T) {
 			wantBody:        `{"name":"quote\"line\nbreak","tags":["a","b"],"values":[1,true,null]}`,
 			wantContentType: "application/json",
 		},
+		"json excludes exporter parameters": {
+			body:            Body{JSON: queryPointer(`.`)},
+			wantBody:        `{"name":["quote\"line\nbreak"],"tag":["a","b"]}`,
+			wantContentType: "application/json",
+		},
 		"text": {
 			body:            Body{Text: queryPointer(`"name=\(.name[0]);tags=\(.tag | join(","))"`)},
 			wantBody:        "name=quote\"line\nbreak;tags=a,b",
+			wantContentType: "text/plain; charset=utf-8",
+		},
+		"text excludes exporter parameters": {
+			body:            Body{Text: queryPointer(`"keys=\(keys | join(","))"`)},
+			wantBody:        "keys=name,tag",
 			wantContentType: "text/plain; charset=utf-8",
 		},
 		"empty text": {
@@ -405,6 +415,7 @@ func TestProbeBody(t *testing.T) {
 				"module": {"test"},
 				"target": {target.URL},
 				"method": {http.MethodPost},
+				"debug":  {"true"},
 				"name":   {"quote\"line\nbreak"},
 				"tag":    {"a", "b"},
 			}

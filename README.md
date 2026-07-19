@@ -52,7 +52,7 @@ When `valid_status_codes` is omitted or empty, only 2xx responses are accepted. 
 
 ### Request body
 
-Use `body.json` or `body.text` to build a request body with a jq expression. The expression receives all probe URL query parameters as an object whose values are always arrays of strings. For example, `?query=up&tag=a&tag=b` is available as `{"query":["up"],"tag":["a","b"]}`.
+Use `body.json` or `body.text` to build a request body with a jq expression. The expression receives probe URL query parameters as an object whose values are always arrays of strings. The exporter control parameters `module`, `target`, `method`, and `debug` are excluded. For example, `?query=up&tag=a&tag=b` is available as `{"query":["up"],"tag":["a","b"]}`.
 
 `body.json` serializes the expression result as JSON:
 

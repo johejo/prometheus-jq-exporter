@@ -441,7 +441,15 @@ func handleProbe(cfg *Config, httpClient *http.Client) http.HandlerFunc {
 		slog.Debug("start probe", "module", module, "method", method, "target", target)
 
 		metricSet := newProbeMetricSet()
-		body, bodyContentType, err := makeBody(ctx, q, mod.Body)
+		bodyParams := make(map[string][]string, len(q))
+		for key, values := range q {
+			switch key {
+			case "module", "target", "method", "debug":
+				continue
+			}
+			bodyParams[key] = values
+		}
+		body, bodyContentType, err := makeBody(ctx, bodyParams, mod.Body)
 		if err != nil {
 			slog.Error(err.Error())
 			metricSet.recordBodyError(err)
