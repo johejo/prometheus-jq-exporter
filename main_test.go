@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -447,6 +448,16 @@ probe_timestamp_errors 0
 			wantStatus: http.StatusOK,
 			wantBody:   probeStatus(0, 0, 1, 0, 0, 0),
 		},
+		"large counter": {
+			body: `{"value":10000000}`,
+			metrics: []Metric{{
+				Name:      "item_count",
+				ValueType: valueTypeCounter,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   "item_count{} 10000000\n" + probeStatus(0, 0, 0, 1, 1, 0),
+		},
 		"null metric query": {
 			body: `{}`,
 			metrics: []Metric{{
@@ -522,6 +533,28 @@ func TestProbeDebugIncludesError(t *testing.T) {
 func TestAsCounterValueRejectsNegativeInt(t *testing.T) {
 	if _, err := asCounterValue(-1); err == nil {
 		t.Fatal("expected negative counter value error")
+	}
+}
+
+func TestAsCounterValueFloat64(t *testing.T) {
+	value, err := asCounterValue(float64(10000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert(t, uint64(10000000), value)
+
+	for name, value := range map[string]float64{
+		"negative":          -1,
+		"fractional":        1.5,
+		"not a number":      math.NaN(),
+		"positive infinity": math.Inf(1),
+		"out of range":      float64(math.MaxUint64),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := asCounterValue(value); err == nil {
+				t.Fatalf("expected error for %v", value)
+			}
+		})
 	}
 }
 

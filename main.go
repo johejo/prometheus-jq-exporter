@@ -218,6 +218,11 @@ func asCounterValue(value any) (uint64, error) {
 			return 0, fmt.Errorf("counter value %d must not be negative", v)
 		}
 		u64Value = uint64(v)
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < 0 || v >= float64(math.MaxUint64) {
+			return 0, fmt.Errorf("counter value %v is not a uint64", v)
+		}
+		u64Value = uint64(v)
 	default:
 		var err error
 		u64Value, err = strconv.ParseUint(fmt.Sprint(v), 10, 64)
