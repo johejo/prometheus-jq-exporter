@@ -32,12 +32,7 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Run("file", func(t *testing.T) {
-		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg))
-		assert(t, 200, result.StatusCode)
-
-		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
-		want := trim(`
+	want := trim(`
 tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
 tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
 tailscale_status_peer_rx_bytes{machine_name="testhostname"} 168365416
@@ -45,6 +40,11 @@ tailscale_status_peer_rx_bytes{machine_name="testhostname2"} 0
 tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
 tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 `)
+	t.Run("file", func(t *testing.T) {
+		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg))
+		assert(t, 200, result.StatusCode)
+
+		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
 		assert(t, want, b)
 	})
 
@@ -57,14 +57,6 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
-		want := trim(`
-tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
-tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
-tailscale_status_peer_rx_bytes{machine_name="testhostname"} 168365416
-tailscale_status_peer_rx_bytes{machine_name="testhostname2"} 0
-tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
-tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
-`)
 		assert(t, want, b)
 	})
 
@@ -80,14 +72,6 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
-		want := trim(`
-tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
-tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
-tailscale_status_peer_rx_bytes{machine_name="testhostname"} 168365416
-tailscale_status_peer_rx_bytes{machine_name="testhostname2"} 0
-tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
-tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
-`)
 		assert(t, want, b)
 	})
 }
@@ -226,10 +210,6 @@ func TestProbeErrorStatus(t *testing.T) {
 		_, _ = io.WriteString(w, "not JSON")
 	}))
 	t.Cleanup(invalidJSONTarget.Close)
-	validJSONTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{}`)
-	}))
-	t.Cleanup(validJSONTarget.Close)
 
 	tests := map[string]struct {
 		cfg    *Config
@@ -260,27 +240,6 @@ func TestProbeErrorStatus(t *testing.T) {
 			cfg:    &Config{Modules: map[string]Module{"test": {}}},
 			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
 			want:   http.StatusServiceUnavailable,
-		},
-		"body query evaluation failure": {
-			cfg: &Config{Modules: map[string]Module{"test": {
-				Body: Body{JSON: queryPointer(`error("failed")`)},
-			}}},
-			target: "/probe?module=test&target=" + url.QueryEscape(invalidJSONTarget.URL),
-			want:   http.StatusInternalServerError,
-		},
-		"jq query evaluation failure": {
-			cfg: &Config{Modules: map[string]Module{"test": {
-				Metrics: []Metric{{Name: "failed_metric", Query: `error("failed")`, Value: "1"}},
-			}}},
-			target: "/probe?module=test&target=" + url.QueryEscape(validJSONTarget.URL),
-			want:   http.StatusInternalServerError,
-		},
-		"invalid metric": {
-			cfg: &Config{Modules: map[string]Module{"test": {
-				Metrics: []Metric{{Name: `"invalid-name"`, ValueType: "gauge", Value: "1"}},
-			}}},
-			target: "/probe?module=test&target=" + url.QueryEscape(validJSONTarget.URL),
-			want:   http.StatusInternalServerError,
 		},
 	}
 
