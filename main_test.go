@@ -23,12 +23,7 @@ import (
 )
 
 func Test(t *testing.T) {
-	*enableFileTransport = true
-	*enableUnixSocketTransport = true
-	t.Cleanup(func() {
-		*enableFileTransport = false
-		*enableUnixSocketTransport = false
-	})
+	httpClient := newHTTPClient(true, true)
 
 	cfg, err := loadConfig("./testdata/config.yaml", false)
 	if err != nil {
@@ -49,7 +44,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname"} 363769796
 tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 `)
 	t.Run("file", func(t *testing.T) {
-		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg))
+		result := testReq(http.MethodGet, "/probe?module=tailscale&target=file://testdata/tailscale-status.json", nil, handleProbe(cfg, httpClient))
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -61,7 +56,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		t.Cleanup(ts.Close)
 
 		target := fmt.Sprintf("/probe?module=tailscale&target=%s/tailscale-status.json", ts.URL)
-		result := testReq(http.MethodGet, target, nil, handleProbe(cfg))
+		result := testReq(http.MethodGet, target, nil, handleProbe(cfg, httpClient))
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -76,7 +71,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 		t.Cleanup(ts.Close)
 
 		target := fmt.Sprintf("/probe?module=tailscale&target=http://%s/tailscale-status.json", testSock)
-		result := testReq(http.MethodGet, target, nil, handleProbe(cfg))
+		result := testReq(http.MethodGet, target, nil, handleProbe(cfg, httpClient))
 		assert(t, 200, result.StatusCode)
 
 		b := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -113,7 +108,7 @@ func TestProbeMetricsAreRequestScoped(t *testing.T) {
 	}))
 	t.Cleanup(target.Close)
 
-	probe := handleProbe(mustCompileConfig(t, cfg))
+	probe := handleProbe(mustCompileConfig(t, cfg), http.DefaultClient)
 	type requestResult struct {
 		statusCode int
 		body       string
@@ -231,7 +226,7 @@ func TestProbeEscapesLabelValues(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, trim(`
@@ -288,7 +283,7 @@ func TestProbeErrorStatus(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg)))
+			result := testReq(http.MethodGet, test.target, nil, handleProbe(mustCompileConfig(t, test.cfg), http.DefaultClient))
 			assert(t, test.want, result.StatusCode)
 			if test.wantBody != "" {
 				body := string(must[[]byte](t)(io.ReadAll(result.Body)))
@@ -352,7 +347,7 @@ func TestProbeBody(t *testing.T) {
 				"name":   {"quote\"line\nbreak"},
 				"tag":    {"a", "b"},
 			}
-			result := testReq(http.MethodGet, "/probe?"+params.Encode(), nil, handleProbe(cfg))
+			result := testReq(http.MethodGet, "/probe?"+params.Encode(), nil, handleProbe(cfg, http.DefaultClient))
 			assert(t, http.StatusOK, result.StatusCode)
 			assert(t, test.wantBody, gotBody)
 			assert(t, test.wantContentType, gotContentType)
@@ -379,7 +374,7 @@ func TestProbeRejectsInvalidBodyResults(t *testing.T) {
 
 			cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {Body: body}}})
 			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-			result := testReq(http.MethodGet, query, nil, handleProbe(cfg))
+			result := testReq(http.MethodGet, query, nil, handleProbe(cfg, http.DefaultClient))
 			assert(t, http.StatusOK, result.StatusCode)
 			probeBody := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			assert(t, probeStatus(1, 0, 0, 0, 0, 0), probeBody)
@@ -493,7 +488,7 @@ probe_timestamp_errors 0
 				"test": {Metrics: test.metrics},
 			}}
 			query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
+			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
 			assert(t, test.wantStatus, result.StatusCode)
 			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			assert(t, test.wantBody, body)
@@ -511,7 +506,7 @@ func TestProbeRejectsDynamicReservedMetricName(t *testing.T) {
 		"test": {Metrics: []Metric{{Name: ".name", ValueType: valueTypeGauge, Value: ".value"}}},
 	}}
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, probeStatus(0, 0, 1, 0, 0, 0), body)
@@ -519,7 +514,7 @@ func TestProbeRejectsDynamicReservedMetricName(t *testing.T) {
 
 func TestProbeDebugIncludesError(t *testing.T) {
 	cfg := &Config{Modules: map[string]Module{"test": {}}}
-	result := testReq(http.MethodGet, "/probe?module=test&debug=true&target=%3A%2F%2F", nil, handleProbe(mustCompileConfig(t, cfg)))
+	result := testReq(http.MethodGet, "/probe?module=test&debug=true&target=%3A%2F%2F", nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	if !strings.Contains(body, `# probe_error "parse \"://\": missing protocol scheme"`+"\n") {
@@ -592,7 +587,7 @@ func TestProductionFlagsExpandEnvAndDefaultMetadata(t *testing.T) {
 	t.Cleanup(target.Close)
 	t.Cleanup(func() { metrics.ExposeMetadata(false) })
 
-	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata))
+	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata, http.DefaultClient))
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
 	result := testReq(http.MethodGet, query, nil, handler)
 	assert(t, http.StatusOK, result.StatusCode)
@@ -671,7 +666,7 @@ func TestProbeValidStatusCodes(t *testing.T) {
 			}}
 			probeTarget := fmt.Sprintf("%s?status=%d", target.URL, test.status)
 			query := "/probe?module=test&target=" + url.QueryEscape(probeTarget)
-			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
+			result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
 			assert(t, test.want, result.StatusCode)
 			body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 			fetchErrors := 0
@@ -971,7 +966,7 @@ func TestProbeEpochTimestampPerValue(t *testing.T) {
 	t.Cleanup(target.Close)
 
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
-	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg)))
+	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 	assert(t, trim(`

@@ -20,7 +20,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/goccy/go-yaml"
@@ -35,8 +34,6 @@ var (
 	exposeMetadata            = flag.Bool("expose-metadata", true, "expose metric metadata")
 	enableFileTransport       = flag.Bool("enable-file-transport", false, "enable file transport")
 	enableUnixSocketTransport = flag.Bool("enable-unix-socket-transport", false, "enable unix socket transport")
-
-	httpClient = sync.OnceValue(initHTTPClient)
 )
 
 const (
@@ -65,7 +62,8 @@ func main() {
 
 	initLogger(*loglevel)
 
-	handler, err := newHandler(*config, *expandEnv, *exposeMetadata)
+	httpClient := newHTTPClient(*enableFileTransport, *enableUnixSocketTransport)
+	handler, err := newHandler(*config, *expandEnv, *exposeMetadata, httpClient)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +72,7 @@ func main() {
 	http.ListenAndServe(*addr, handler)
 }
 
-func newHandler(config string, expandEnv, exposeMetadata bool) (http.Handler, error) {
+func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.Client) (http.Handler, error) {
 	cfg, err := loadConfig(config, expandEnv)
 	if err != nil {
 		return nil, err
@@ -83,7 +81,7 @@ func newHandler(config string, expandEnv, exposeMetadata bool) (http.Handler, er
 	metrics.ExposeMetadata(exposeMetadata)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /metrics", handleMetrics)
-	mux.HandleFunc("GET /probe", handleProbe(cfg))
+	mux.HandleFunc("GET /probe", handleProbe(cfg, httpClient))
 	return mux, nil
 }
 
@@ -109,10 +107,10 @@ func jq(ctx context.Context, query compiledQuery, value any) (any, error) {
 	return result, nil
 }
 
-func initHTTPClient() *http.Client {
-	defaultTransport := http.DefaultTransport.(*http.Transport)
+func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool) *http.Client {
+	defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
 
-	if *enableFileTransport {
+	if enableFileTransport {
 		fileTransport := http.NewFileTransport(http.Dir("."))
 		defaultTransport.RegisterProtocol("file", RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL.Host != "." {
@@ -124,7 +122,7 @@ func initHTTPClient() *http.Client {
 	}
 
 	var transport http.RoundTripper
-	if *enableUnixSocketTransport {
+	if enableUnixSocketTransport {
 		transport = transportWithUnixSupport(defaultTransport)
 	} else {
 		transport = defaultTransport
@@ -275,7 +273,7 @@ func asLabelValue(value any) string {
 	return labelValue
 }
 
-func doHTTP(ctx context.Context, method string, target string, headers map[string]string, body io.Reader, bodyContentType string, validStatusCodes []int) (any, error) {
+func doHTTP(ctx context.Context, httpClient *http.Client, method string, target string, headers map[string]string, body io.Reader, bodyContentType string, validStatusCodes []int) (any, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
@@ -286,7 +284,7 @@ func doHTTP(ctx context.Context, method string, target string, headers map[strin
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := httpClient().Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +375,7 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics.WriteProcessMetrics(w)
 }
 
-func handleProbe(cfg *Config) http.HandlerFunc {
+func handleProbe(cfg *Config, httpClient *http.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		ctx := r.Context()
@@ -417,7 +415,7 @@ func handleProbe(cfg *Config) http.HandlerFunc {
 			return
 		}
 		var bodyJSON any
-		bodyJSON, err = doHTTP(ctx, method, target, mod.Headers, body, bodyContentType, mod.ValidStatusCodes)
+		bodyJSON, err = doHTTP(ctx, httpClient, method, target, mod.Headers, body, bodyContentType, mod.ValidStatusCodes)
 		if err != nil {
 			slog.Error(err.Error())
 			metricSet.recordFetchError(err)
