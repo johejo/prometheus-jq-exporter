@@ -120,12 +120,12 @@ func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.
 	return mux, nil
 }
 
-func jq(ctx context.Context, query compiledQuery, value any) (any, error) {
+func jqAll(ctx context.Context, query compiledQuery, value any) ([]any, error) {
 	if query.code == nil {
-		return query.source, nil
+		return []any{query.source}, nil
 	}
 	iter := query.code.RunWithContext(ctx, value)
-	var result any
+	var results []any
 	for {
 		v, ok := iter.Next()
 		if !ok {
@@ -137,9 +137,23 @@ func jq(ctx context.Context, query compiledQuery, value any) (any, error) {
 			}
 			return nil, err
 		}
-		result = v
+		results = append(results, v)
 	}
-	return result, nil
+	return results, nil
+}
+
+func jqOne(ctx context.Context, query compiledQuery, value any) (any, error) {
+	results, err := jqAll(ctx, query, value)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("query %q produced no value", query.source)
+	}
+	if len(results) > 1 {
+		return nil, fmt.Errorf("query %q produced %d values, expected one", query.source, len(results))
+	}
+	return results[0], nil
 }
 
 func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool, timeout time.Duration) *http.Client {
@@ -274,7 +288,7 @@ func initLogger(loglevel string) {
 func makeLabelKV(ctx context.Context, labels map[string]compiledQuery, value any) (string, error) {
 	var labelKV []string
 	for labelName, labelQuery := range labels {
-		_labelValue, err := jq(ctx, labelQuery, value)
+		_labelValue, err := jqOne(ctx, labelQuery, value)
 		if err != nil {
 			return "", err
 		}
@@ -448,33 +462,6 @@ func makeBody(ctx context.Context, params map[string][]string, body Body) (io.Re
 	}
 }
 
-func jqOne(ctx context.Context, query compiledQuery, value any) (any, error) {
-	iter := query.code.RunWithContext(ctx, value)
-	var result any
-	count := 0
-	for {
-		value, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if err, ok := value.(error); ok {
-			if err, ok := err.(*gojq.HaltError); ok && err.Value() == nil {
-				break
-			}
-			return nil, err
-		}
-		count++
-		if count > 1 {
-			return nil, fmt.Errorf("body query produced multiple values")
-		}
-		result = value
-	}
-	if count == 0 {
-		return nil, fmt.Errorf("body query produced no value")
-	}
-	return result, nil
-}
-
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics.WriteProcessMetrics(w)
 }
@@ -536,18 +523,20 @@ func handleProbe(cfg *Config, httpClient *http.Client, maxResponseBodySize int64
 		}
 
 		for metricIndex, m := range mod.Metrics {
-			var value any
+			var values []any
 			if m.query == nil {
-				value = bodyJSON
+				values = asSlice(bodyJSON)
 			} else {
-				value, err = jq(ctx, *m.query, bodyJSON)
+				outputs, err := jqAll(ctx, *m.query, bodyJSON)
 				if err != nil {
 					metricSet.recordMetricError(err)
 					slog.Error("failed to query metric values", "metric_index", metricIndex, "metric", m.Name, "query", m.Query, "error", err)
 					continue
 				}
+				for _, output := range outputs {
+					values = append(values, asSlice(output)...)
+				}
 			}
-			values := asSlice(value)
 
 			for valueIndex, value := range values {
 				if err := makeMetrics(ctx, metricSet, value, m); err != nil {
@@ -689,13 +678,17 @@ func makeEpochTimestamp(ctx context.Context, query *compiledQuery, value any) (*
 	if query == nil {
 		return nil, nil
 	}
-	result, err := jq(ctx, *query, value)
+	results, err := jqAll(ctx, *query, value)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
+	if len(results) > 1 {
+		return nil, fmt.Errorf("timestamp query %q produced %d values, expected at most one", query.source, len(results))
+	}
+	if len(results) == 0 || results[0] == nil {
 		return nil, nil
 	}
+	result := results[0]
 
 	var timestamp int64
 	switch v := result.(type) {
@@ -721,7 +714,7 @@ func makeEpochTimestamp(ctx context.Context, query *compiledQuery, value any) (*
 
 func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Metric) error {
 	var name strings.Builder
-	nameResult, err := jq(ctx, m.name, value)
+	nameResult, err := jqOne(ctx, m.name, value)
 	if err != nil {
 		return err
 	}
@@ -742,7 +735,7 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		return fmt.Errorf("metric family %q is reserved", metricFamily)
 	}
 
-	v, err := jq(ctx, m.value, value)
+	v, err := jqOne(ctx, m.value, value)
 	if err != nil {
 		return err
 	}

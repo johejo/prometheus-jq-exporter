@@ -103,6 +103,8 @@ Only one of `body.json` and `body.text` can be specified. Each expression must p
 
 Each metric accepts `valueType: counter`, `valueType: gauge`, or `valueType: untyped`. When `valueType` is omitted, it defaults to `untyped`. Prefer `counter` or `gauge` when the source metric's semantics are known.
 
+A metric's `query` expression selects the objects that produce samples: every output contributes, and array outputs are flattened one level, so `.items` and `.items[]` are equivalent. No outputs means no samples. The `name`, `labels`, and `value` expressions run once per selected object and must each produce exactly one value.
+
 Set `epochTimestamp` to a jq expression to use a value from each metric object as the sample timestamp. The value must be an integer Unix timestamp in milliseconds that fits in an `int64`. Integer-valued floats and base-10 integer strings are also accepted:
 
 ```yaml
@@ -114,7 +116,7 @@ metrics:
     epochTimestamp: '.timestamp'
 ```
 
-If the timestamp expression produces `null` or no value, the timestamp is treated as optional and the sample is exposed without one. If the expression cannot be evaluated or produces another unsupported value, the sample is exposed without a timestamp, the error is logged, and `probe_success` is set to `0`. Explicit timestamps change Prometheus staleness handling; see the [Prometheus staleness documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/#staleness) before enabling them.
+If the timestamp expression produces `null` or no value, the timestamp is treated as optional and the sample is exposed without one. If the expression cannot be evaluated, produces multiple values, or produces another unsupported value, the sample is exposed without a timestamp, the error is logged, and `probe_success` is set to `0`. Explicit timestamps change Prometheus staleness handling; see the [Prometheus staleness documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/#staleness) before enabling them.
 
 ### Probe success
 

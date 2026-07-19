@@ -731,6 +731,83 @@ probe_timestamp_errors 0
 			wantStatus: http.StatusOK,
 			wantBody:   probeStatus(0, 0, 0, 0, 1, 0),
 		},
+		"iterator query": {
+			body: `{"items":[{"id":"a","value":1},{"id":"b","value":2}]}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     ".items[]",
+				Labels:    map[string]Query{"id": ".id"},
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   "item_value{id=\"a\"} 1\nitem_value{id=\"b\"} 2\n" + probeStatus(0, 0, 0, 2, 1, 0),
+		},
+		"multiple array outputs": {
+			body: `{"a":[{"id":"a","value":1}],"b":[{"id":"b","value":2}]}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     ".a, .b",
+				Labels:    map[string]Query{"id": ".id"},
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   "item_value{id=\"a\"} 1\nitem_value{id=\"b\"} 2\n" + probeStatus(0, 0, 0, 2, 1, 0),
+		},
+		"empty query output": {
+			body: `{}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     "empty",
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 0, 0, 1, 0),
+		},
+		"value multiple outputs": {
+			body: `{}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				ValueType: valueTypeGauge,
+				Value:     "1, 2",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 1, 0, 0, 0),
+		},
+		"value no output": {
+			body: `{}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				ValueType: valueTypeGauge,
+				Value:     "empty",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 1, 0, 0, 0),
+		},
+		"label multiple outputs": {
+			body: `{}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Labels:    map[string]Query{"id": "1, 2"},
+				ValueType: valueTypeGauge,
+				Value:     "1",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 1, 0, 0, 0),
+		},
+		"timestamp multiple outputs": {
+			body: `{"value":1,"ts":1712345678901}`,
+			metrics: []Metric{{
+				Name:           "ts_value",
+				ValueType:      valueTypeGauge,
+				Value:          ".value",
+				EpochTimestamp: ".ts, .ts",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   probeStatus(0, 0, 0, 1, 0, 1) + "ts_value{} 1\n",
+		},
 	}
 
 	for name, test := range tests {
