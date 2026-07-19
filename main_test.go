@@ -1035,7 +1035,7 @@ func TestMakeMetricsEpochTimestampFallback(t *testing.T) {
 
 			metrics.ExposeMetadata(false)
 			var output strings.Builder
-			metricSet.WriteProbeResult(&output)
+			metricSet.WriteProbeResult(&output, false)
 			assert(t, probeStatus(0, 0, 0, 1, 0, 1)+"probe_value{} 1\n", output.String())
 		})
 	}
@@ -1065,7 +1065,7 @@ func TestMakeMetricsEpochTimestampOptional(t *testing.T) {
 
 			metrics.ExposeMetadata(false)
 			var output strings.Builder
-			metricSet.WriteProbeResult(&output)
+			metricSet.WriteProbeResult(&output, false)
 			assert(t, probeStatus(0, 0, 0, 1, 1, 0)+"probe_value{} 1\n", output.String())
 		})
 	}

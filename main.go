@@ -513,8 +513,8 @@ func (s *probeMetricSet) addGauge(name string, value float64) {
 	}
 }
 
-func (s *probeMetricSet) WriteProbeResult(w io.Writer, debug ...bool) {
-	if len(debug) > 0 && debug[0] {
+func (s *probeMetricSet) WriteProbeResult(w io.Writer, debug bool) {
+	if debug {
 		for _, err := range s.errors {
 			fmt.Fprintf(w, "# probe_error %q\n", err.Error())
 		}
