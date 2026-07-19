@@ -50,18 +50,26 @@ func main() {
 
 	initLogger(*loglevel)
 
-	cfg, err := loadConfig(*config, *expandEnv)
+	handler, err := newHandler(*config, *expandEnv, *exposeMetadata)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	metrics.ExposeMetadata(*exposeMetadata)
+	slog.Info("listening", "addr", *addr)
+	http.ListenAndServe(*addr, handler)
+}
+
+func newHandler(config string, expandEnv, exposeMetadata bool) (http.Handler, error) {
+	cfg, err := loadConfig(config, expandEnv)
+	if err != nil {
+		return nil, err
+	}
+
+	metrics.ExposeMetadata(exposeMetadata)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /metrics", handleMetrics)
 	mux.HandleFunc("GET /probe", handleProbe(cfg))
-
-	slog.Info("listening", "addr", *addr)
-	http.ListenAndServe(*addr, mux)
+	return mux, nil
 }
 
 func jq(ctx context.Context, query compiledQuery, value any) (any, error) {
@@ -191,6 +199,9 @@ func asCounterValue(value any) (uint64, error) {
 	var u64Value uint64
 	switch v := value.(type) {
 	case int:
+		if v < 0 {
+			return 0, fmt.Errorf("counter value %d must not be negative", v)
+		}
 		u64Value = uint64(v)
 	default:
 		var err error
@@ -220,6 +231,9 @@ func asGaugeValue(value any) (float64, error) {
 }
 
 func asSlice(value any) []any {
+	if value == nil {
+		return []any{nil}
+	}
 	var values []any
 	switch reflect.TypeOf(value).Kind() {
 	case reflect.Slice:

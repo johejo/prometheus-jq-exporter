@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -383,6 +384,27 @@ item_value{id="c"} 3
 			wantStatus: http.StatusInternalServerError,
 			wantBody:   "Internal Server Error\n",
 		},
+		"negative counter": {
+			body: `{"value":-1}`,
+			metrics: []Metric{{
+				Name:      "item_count",
+				ValueType: valueTypeCounter,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   "Internal Server Error\n",
+		},
+		"null metric query": {
+			body: `{}`,
+			metrics: []Metric{{
+				Name:      "null_input",
+				Query:     ".missing",
+				ValueType: valueTypeGauge,
+				Value:     "1",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   "null_input{} 1\n",
+		},
 		"empty values": {
 			body: `{"items":[]}`,
 			metrics: []Metric{{
@@ -413,6 +435,58 @@ item_value{id="c"} 3
 			assert(t, test.wantBody, body)
 		})
 	}
+}
+
+func TestAsCounterValueRejectsNegativeInt(t *testing.T) {
+	if _, err := asCounterValue(-1); err == nil {
+		t.Fatal("expected negative counter value error")
+	}
+}
+
+func TestProductionFlagsExpandEnvAndDefaultMetadata(t *testing.T) {
+	if !*exposeMetadata {
+		t.Fatal("production expose-metadata default must be true")
+	}
+	t.Setenv("PROMETHEUS_JQ_EXPORTER_METRIC_NAME", "expanded_counter")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `modules:
+  test:
+    metrics:
+      - name: ${PROMETHEUS_JQ_EXPORTER_METRIC_NAME}
+        valueType: counter
+        value: .value
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalConfig, originalExpandEnv := *config, *expandEnv
+	t.Cleanup(func() {
+		_ = flag.Set("config", originalConfig)
+		_ = flag.Set("expand-env", strconv.FormatBool(originalExpandEnv))
+	})
+	if err := flag.Set("config", configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := flag.Set("expand-env", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"value":3}`)
+	}))
+	t.Cleanup(target.Close)
+	t.Cleanup(func() { metrics.ExposeMetadata(false) })
+
+	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata))
+	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
+	result := testReq(http.MethodGet, query, nil, handler)
+	assert(t, http.StatusOK, result.StatusCode)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+	assert(t, trim(`
+# HELP expanded_counter
+# TYPE expanded_counter counter
+expanded_counter{} 3
+`), body)
 }
 
 func TestProbeValidStatusCodes(t *testing.T) {
