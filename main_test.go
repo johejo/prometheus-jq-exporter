@@ -1179,9 +1179,9 @@ func TestCompileConfigRejectsInvalidQueries(t *testing.T) {
 			metric: Metric{Name: "(", Value: "1"},
 			field:  "name",
 		},
-		"label parse error": {
-			metric: Metric{Name: "metric", Labels: map[string]Query{"label": "("}, Value: "1"},
-			field:  `label "label"`,
+		"name compile error": {
+			metric: Metric{Name: "foo-bar", Value: "1"},
+			field:  "name",
 		},
 		"value compile error": {
 			metric: Metric{Name: "metric", Value: "unknown_function"},
@@ -1228,26 +1228,74 @@ func TestCompileConfigRejectsReservedMetricName(t *testing.T) {
 	}
 }
 
-func TestCompileConfigPreservesLiteralFallback(t *testing.T) {
+func TestCompileMetricNameLiteralDetection(t *testing.T) {
+	tests := map[string]struct {
+		name    Query
+		literal bool
+	}{
+		"plain name":         {name: "probe_value", literal: true},
+		"jq builtin as name": {name: "length", literal: true},
+		"name with colons":   {name: "node:cpu_ratio", literal: true},
+		"index query":        {name: ".foo", literal: false},
+	}
+
+	for testName, test := range tests {
+		t.Run(testName, func(t *testing.T) {
+			metric := mustCompileMetric(t, Metric{Name: test.name, Value: "1"})
+			assert(t, test.name, metric.name.source)
+			assert(t, test.literal, metric.name.code == nil)
+		})
+	}
+}
+
+func TestCompileMetricLabelValueLiteralDetection(t *testing.T) {
+	tests := map[string]struct {
+		label   Query
+		literal bool
+	}{
+		"jq keyword true":          {label: "true", literal: true},
+		"jq keyword null":          {label: "null", literal: true},
+		"jq builtin":               {label: "length", literal: true},
+		"parse error fallback":     {label: "foo:bar", literal: true},
+		"compile error fallback":   {label: "us-east-1", literal: true},
+		"index query":              {label: ".DNSName", literal: false},
+		"parenthesized jq builtin": {label: "(now)", literal: false},
+	}
+
+	for testName, test := range tests {
+		t.Run(testName, func(t *testing.T) {
+			metric := mustCompileMetric(t, Metric{
+				Name:   "probe_value",
+				Labels: map[string]Query{"kind": test.label},
+				Value:  "1",
+			})
+			assert(t, test.label, metric.labels["kind"].source)
+			assert(t, test.literal, metric.labels["kind"].code == nil)
+		})
+	}
+}
+
+func TestCompileConfigPreservesLiterals(t *testing.T) {
 	metric := mustCompileConfig(t, &Config{Modules: map[string]Module{
 		"test": {Metrics: []Metric{{
-			Name:      "probe_value",
-			Labels:    map[string]Query{"kind": "static"},
+			Name: "node:cpu_ratio",
+			Labels: map[string]Query{
+				"kind":    "static",
+				"state":   "true",
+				"version": "v1.2.3",
+			},
 			ValueType: valueTypeGauge,
 			Value:     "1",
 		}}},
 	}}).Modules["test"].Metrics[0]
 
-	if metric.name.code != nil || metric.labels["kind"].code != nil {
-		t.Fatal("literal name and label should not have executable jq code")
-	}
 	metricSet := newProbeMetricSet()
 	if err := makeMetrics(t.Context(), metricSet, nil, metric); err != nil {
 		t.Fatal(err)
 	}
 	var output strings.Builder
 	metricSet.WritePrometheus(&output)
-	assert(t, "probe_value{kind=\"static\"} 1\n", output.String())
+	assert(t, "node:cpu_ratio{kind=\"static\",state=\"true\",version=\"v1.2.3\"} 1\n", output.String())
 }
 
 func TestProbeMetricFloatValueFormatting(t *testing.T) {

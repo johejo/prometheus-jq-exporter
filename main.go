@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -850,16 +852,36 @@ func (c queryCompiler) compile(source Query, literalFallback bool) (compiledQuer
 		}
 		c[source] = result
 	}
-	if result.parseErr != nil {
-		return compiledQuery{}, result.parseErr
-	}
-	if result.compileErr != nil {
+	if err := cmp.Or(result.parseErr, result.compileErr); err != nil {
 		if literalFallback {
 			return compiledQuery{source: source}, nil
 		}
-		return compiledQuery{}, result.compileErr
+		return compiledQuery{}, err
 	}
 	return compiledQuery{source: source, code: result.code}, nil
+}
+
+var (
+	metricNameRegexp   = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+	labelLiteralRegexp = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+)
+
+func compileName(compiler queryCompiler, source Query) (compiledQuery, error) {
+	if metricNameRegexp.MatchString(source) {
+		return compiledQuery{source: source}, nil
+	}
+	query, err := compiler.compile(source, false)
+	if err != nil {
+		return compiledQuery{}, fmt.Errorf("%q is neither a valid metric name nor a valid jq query: %w", source, err)
+	}
+	return query, nil
+}
+
+func compileLabelValue(compiler queryCompiler, source Query) (compiledQuery, error) {
+	if labelLiteralRegexp.MatchString(source) {
+		return compiledQuery{source: source}, nil
+	}
+	return compiler.compile(source, true)
 }
 
 func compileConfig(cfg *Config) error {
@@ -920,7 +942,7 @@ func compileMetric(compiler queryCompiler, metric Metric) (Metric, error) {
 		}
 		compiled.query = &query
 	}
-	compiled.name, err = compiler.compile(metric.Name, true)
+	compiled.name, err = compileName(compiler, metric.Name)
 	if err != nil {
 		return Metric{}, fmt.Errorf("name: %w", err)
 	}
@@ -928,7 +950,7 @@ func compileMetric(compiler queryCompiler, metric Metric) (Metric, error) {
 		return Metric{}, fmt.Errorf("name: metric family %q is reserved", compiled.name.source)
 	}
 	for labelName, labelQuery := range metric.Labels {
-		compiledLabel, compileErr := compiler.compile(labelQuery, true)
+		compiledLabel, compileErr := compileLabelValue(compiler, labelQuery)
 		if compileErr != nil {
 			return Metric{}, fmt.Errorf("label %q: %w", labelName, compileErr)
 		}

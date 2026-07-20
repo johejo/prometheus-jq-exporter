@@ -105,6 +105,8 @@ Each metric accepts `valueType: counter`, `valueType: gauge`, or `valueType: unt
 
 A metric's `query` expression selects the objects that produce samples: every output contributes, and array outputs are flattened one level, so `.items` and `.items[]` are equivalent. No outputs means no samples. The `name`, `labels`, and `value` expressions run once per selected object and must each produce exactly one value.
 
+A `name` matching `[a-zA-Z_:][a-zA-Z0-9_:]*` and a label value matching `[a-zA-Z_][a-zA-Z0-9_]*` are used verbatim, even when they are also valid jq expressions such as `length` or `true`; anything else is compiled as a jq expression. A name that fails to compile rejects startup, while a label value that fails to compile (e.g. `v1.2.3`) falls back to the literal string. Wrap a bare builtin in parentheses (e.g. `(now)`) to evaluate it as a label value.
+
 Set `epochTimestamp` to a jq expression to use a value from each metric object as the sample timestamp. The value must be an integer Unix timestamp in milliseconds that fits in an `int64`. Integer-valued floats and base-10 integer strings are also accepted:
 
 ```yaml
