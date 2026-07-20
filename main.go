@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,7 +21,6 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -145,6 +145,9 @@ func jqAll(ctx context.Context, query compiledQuery, value any) ([]any, error) {
 }
 
 func jqOne(ctx context.Context, query compiledQuery, value any) (any, error) {
+	if query.code == nil {
+		return query.source, nil
+	}
 	results, err := jqAll(ctx, query, value)
 	if err != nil {
 		return nil, err
@@ -311,6 +314,10 @@ func escapeLabelValue(value string) string {
 	return labelValueEscaper.Replace(value)
 }
 
+func isIntegralInRange(v, min, max float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && math.Trunc(v) == v && v >= min && v < max
+}
+
 func asCounterValue(value any) (uint64, error) {
 	var u64Value uint64
 	switch v := value.(type) {
@@ -320,7 +327,7 @@ func asCounterValue(value any) (uint64, error) {
 		}
 		u64Value = uint64(v)
 	case float64:
-		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < 0 || v >= float64(math.MaxUint64) {
+		if !isIntegralInRange(v, 0, float64(math.MaxUint64)) {
 			return 0, fmt.Errorf("counter value %v is not a uint64", v)
 		}
 		u64Value = uint64(v)
@@ -417,14 +424,11 @@ func readResponseBody(r io.Reader, maxSize int64) ([]byte, error) {
 	if maxSize <= 0 {
 		return nil, fmt.Errorf("maximum response body size must be positive")
 	}
-	b, err := io.ReadAll(io.LimitReader(r, maxSize))
+	b, err := io.ReadAll(http.MaxBytesReader(nil, io.NopCloser(r), maxSize))
 	if err != nil {
-		return nil, err
-	}
-	var extra [1]byte
-	if n, err := io.ReadFull(r, extra[:]); n > 0 {
-		return nil, fmt.Errorf("target response body exceeds %d bytes", maxSize)
-	} else if err != nil && err != io.EOF {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			return nil, fmt.Errorf("target response body exceeds %d bytes", maxSize)
+		}
 		return nil, err
 	}
 	return b, nil
@@ -436,6 +440,10 @@ func makeBody(ctx context.Context, params map[string][]string, body Body) (io.Re
 	}
 	input := make(map[string]any, len(params))
 	for key, values := range params {
+		switch key {
+		case "module", "target", "method", "debug":
+			continue
+		}
 		items := make([]any, len(values))
 		for i, value := range values {
 			items[i] = value
@@ -499,20 +507,13 @@ func handleProbe(cfg *Config, httpClient *http.Client, maxResponseBodySize int64
 
 		slog.Debug("start probe", "module", module, "method", method, "target", target)
 
+		debug := q.Get("debug") == "true"
 		metricSet := newProbeMetricSet()
-		bodyParams := make(map[string][]string, len(q))
-		for key, values := range q {
-			switch key {
-			case "module", "target", "method", "debug":
-				continue
-			}
-			bodyParams[key] = values
-		}
-		body, bodyContentType, err := makeBody(ctx, bodyParams, mod.Body)
+		body, bodyContentType, err := makeBody(ctx, q, mod.Body)
 		if err != nil {
 			slog.Error(err.Error())
 			metricSet.recordBodyError(err)
-			metricSet.WriteProbeResult(w, q.Get("debug") == "true")
+			metricSet.WriteProbeResult(w, debug)
 			return
 		}
 		var bodyJSON any
@@ -520,7 +521,7 @@ func handleProbe(cfg *Config, httpClient *http.Client, maxResponseBodySize int64
 		if err != nil {
 			slog.Error(err.Error())
 			metricSet.recordFetchError(err)
-			metricSet.WriteProbeResult(w, q.Get("debug") == "true")
+			metricSet.WriteProbeResult(w, debug)
 			return
 		}
 
@@ -607,7 +608,6 @@ func (s *probeMetricSet) recordTimestampError(err error) {
 }
 
 func (s *probeMetricSet) addGauge(name string, value float64) {
-	s.familyTypes[name] = valueTypeGauge
 	s.metrics[name] = probeMetric{
 		family:     name,
 		name:       name,
@@ -648,11 +648,8 @@ func (s *probeMetricSet) WritePrometheus(w io.Writer) {
 	for _, m := range s.metrics {
 		probeMetrics = append(probeMetrics, m)
 	}
-	sort.Slice(probeMetrics, func(i, j int) bool {
-		if probeMetrics[i].family != probeMetrics[j].family {
-			return probeMetrics[i].family < probeMetrics[j].family
-		}
-		return probeMetrics[i].name < probeMetrics[j].name
+	slices.SortFunc(probeMetrics, func(a, b probeMetric) int {
+		return cmp.Or(cmp.Compare(a.family, b.family), cmp.Compare(a.name, b.name))
 	})
 	previousFamily := ""
 	for _, m := range probeMetrics {
@@ -663,8 +660,7 @@ func (s *probeMetricSet) WritePrometheus(w io.Writer) {
 		fmt.Fprint(w, m.name, " ")
 		if m.valueType == valueTypeCounter {
 			fmt.Fprint(w, m.counterValue)
-		} else if math.Trunc(m.floatValue) == m.floatValue &&
-			m.floatValue >= math.MinInt64 && m.floatValue < float64(math.MaxInt64) {
+		} else if isIntegralInRange(m.floatValue, math.MinInt64, float64(math.MaxInt64)) {
 			fmt.Fprint(w, int64(m.floatValue))
 		} else {
 			fmt.Fprintf(w, "%g", m.floatValue)
@@ -699,7 +695,7 @@ func makeEpochTimestamp(ctx context.Context, query *compiledQuery, value any) (*
 	case int64:
 		timestamp = v
 	case float64:
-		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < math.MinInt64 || v >= float64(math.MaxInt64) {
+		if !isIntegralInRange(v, math.MinInt64, float64(math.MaxInt64)) {
 			return nil, fmt.Errorf("timestamp %v is not an int64", v)
 		}
 		timestamp = int64(v)
@@ -715,24 +711,19 @@ func makeEpochTimestamp(ctx context.Context, query *compiledQuery, value any) (*
 }
 
 func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Metric) error {
-	var name strings.Builder
 	nameResult, err := jqOne(ctx, m.name, value)
 	if err != nil {
 		return err
 	}
-	name.WriteString(fmt.Sprint(nameResult))
-	name.WriteString("{")
+	metricFamily := fmt.Sprint(nameResult)
 	labelKV, err := makeLabelKV(ctx, m.labels, value)
 	if err != nil {
 		return err
 	}
-	name.WriteString(labelKV)
-	name.WriteString("}")
-	metricName := name.String()
+	metricName := metricFamily + "{" + labelKV + "}"
 	if err := metrics.ValidateMetric(metricName); err != nil {
 		return fmt.Errorf("invalid metric %q: %w", metricName, err)
 	}
-	metricFamily := fmt.Sprint(nameResult)
 	if _, reserved := reservedProbeMetrics[metricFamily]; reserved {
 		return fmt.Errorf("metric family %q is reserved", metricFamily)
 	}
@@ -760,30 +751,18 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 		if err != nil {
 			return err
 		}
-		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
-			return err
-		}
 		probeMetric.counterValue = counterValue
-	case valueTypeGauge:
-		gaugeValue, err := asGaugeValue(v)
+	case valueTypeGauge, valueTypeUntyped:
+		floatValue, err := asGaugeValue(v)
 		if err != nil {
 			return err
 		}
-		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
-			return err
-		}
-		probeMetric.floatValue = gaugeValue
-	case valueTypeUntyped:
-		untypedValue, err := asGaugeValue(v)
-		if err != nil {
-			return err
-		}
-		if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
-			return err
-		}
-		probeMetric.floatValue = untypedValue
+		probeMetric.floatValue = floatValue
 	default:
 		return fmt.Errorf("valueType %s is not supported", m.ValueType)
+	}
+	if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
+		return err
 	}
 	metricSet.metrics[metricName] = probeMetric
 	metricSet.metricsSuccessful++
@@ -814,14 +793,6 @@ func loadConfig(config string, expandEnv bool) (*Config, error) {
 	if err := unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
-	for moduleName, module := range cfg.Modules {
-		for i := range module.Metrics {
-			if module.Metrics[i].ValueType == "" {
-				module.Metrics[i].ValueType = valueTypeUntyped
-			}
-		}
-		cfg.Modules[moduleName] = module
-	}
 	if err := compileConfig(&cfg); err != nil {
 		return nil, err
 	}
@@ -834,9 +805,8 @@ type compiledQuery struct {
 }
 
 type queryCompileResult struct {
-	code       *gojq.Code
-	parseErr   error
-	compileErr error
+	code *gojq.Code
+	err  error
 }
 
 type queryCompiler map[Query]queryCompileResult
@@ -844,19 +814,18 @@ type queryCompiler map[Query]queryCompileResult
 func (c queryCompiler) compile(source Query, literalFallback bool) (compiledQuery, error) {
 	result, ok := c[source]
 	if !ok {
-		query, err := gojq.Parse(source)
-		if err != nil {
-			result.parseErr = err
+		if query, err := gojq.Parse(source); err != nil {
+			result.err = err
 		} else {
-			result.code, result.compileErr = gojq.Compile(query)
+			result.code, result.err = gojq.Compile(query)
 		}
 		c[source] = result
 	}
-	if err := cmp.Or(result.parseErr, result.compileErr); err != nil {
+	if result.err != nil {
 		if literalFallback {
 			return compiledQuery{source: source}, nil
 		}
-		return compiledQuery{}, err
+		return compiledQuery{}, result.err
 	}
 	return compiledQuery{source: source, code: result.code}, nil
 }
@@ -933,6 +902,9 @@ func compileBody(compiler queryCompiler, body Body) (Body, error) {
 
 func compileMetric(compiler queryCompiler, metric Metric) (Metric, error) {
 	compiled := metric
+	if compiled.ValueType == "" {
+		compiled.ValueType = valueTypeUntyped
+	}
 	compiled.labels = make(map[string]compiledQuery, len(metric.Labels))
 	var err error
 	if metric.Query != "" {

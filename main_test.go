@@ -147,13 +147,7 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 6
-probe_success 1
-probe_timestamp_errors 0
+	want := probeStatus(0, 0, 0, 6, 1, 0) + trim(`
 tailscale_status_peer{created="2122-01-14T13:30:18.170320276Z",dns_name="testhostname.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.12.34.56",ipv6="fd7a:115c:a1e0::ac99:b03d",key_expiry="2125-01-08T02:03:11Z",machine_name="testhostname",os="macOS",relay="tok"} 1
 tailscale_status_peer{created="2124-06-14T14:17:04.079089567Z",dns_name="testhostname2.tailc2865.ts.net.",exit_node="false",exit_node_option="false",ipv4="100.123.4.56",ipv6="fd7a:115c:a1e0::ac01:b66c",key_expiry="2124-12-11T14:17:04Z",machine_name="testhostname2",os="android",relay="tok"} 1
 tailscale_status_peer_rx_bytes{machine_name="testhostname"} 168365416
@@ -376,27 +370,10 @@ func TestProbeMetricsAreRequestScoped(t *testing.T) {
 
 	metricNamesBefore := strings.Join(metrics.ListMetricNames(), "\n")
 	first := checkRequest("/first", request("/first"))
-	assert(t, trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 2
-probe_success 1
-probe_timestamp_errors 0
-probe_value{id="a"} 1
-probe_value{id="b"} 2
-`), first)
+	assert(t, probeStatus(0, 0, 0, 2, 1, 0)+"probe_value{id=\"a\"} 1\nprobe_value{id=\"b\"} 2\n", first)
 
 	second := checkRequest("/second", request("/second"))
-	assert(t, trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 1
-probe_success 1
-probe_timestamp_errors 0
-probe_value{id="a"} 10
-`), second)
+	assert(t, probeStatus(0, 0, 0, 1, 1, 0)+"probe_value{id=\"a\"} 10\n", second)
 	assert(t, metricNamesBefore, strings.Join(metrics.ListMetricNames(), "\n"))
 
 	t.Run("concurrent targets", func(t *testing.T) {
@@ -405,34 +382,16 @@ probe_value{id="a"} 10
 		results := make([]requestResult, 2)
 		paths := []string{"/second", "/third"}
 		for i := range paths {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				<-start
 				results[i] = request(paths[i])
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()
 
-		assert(t, trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 1
-probe_success 1
-probe_timestamp_errors 0
-probe_value{id="a"} 10
-`), checkRequest(paths[0], results[0]))
-		assert(t, trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 1
-probe_success 1
-probe_timestamp_errors 0
-probe_value{id="c"} 30
-`), checkRequest(paths[1], results[1]))
+		assert(t, probeStatus(0, 0, 0, 1, 1, 0)+"probe_value{id=\"a\"} 10\n", checkRequest(paths[0], results[0]))
+		assert(t, probeStatus(0, 0, 0, 1, 1, 0)+"probe_value{id=\"c\"} 30\n", checkRequest(paths[1], results[1]))
 	})
 }
 
@@ -474,13 +433,7 @@ func TestProbeEscapesLabelValues(t *testing.T) {
 	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
-	assert(t, trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 1
-probe_success 1
-probe_timestamp_errors 0
+	assert(t, probeStatus(0, 0, 0, 1, 1, 0)+trim(`
 probe_value{label="quote\"line\nbreak\\"} 1
 `), body)
 }
@@ -547,7 +500,7 @@ func TestProbeBody(t *testing.T) {
 	}{
 		"none": {},
 		"json": {
-			body: Body{JSON: queryPointer(`{
+			body: Body{JSON: new(`{
   name: .name[0],
   tags: .tag,
   values: [1, true, null]
@@ -556,26 +509,26 @@ func TestProbeBody(t *testing.T) {
 			wantContentType: "application/json",
 		},
 		"json excludes exporter parameters": {
-			body:            Body{JSON: queryPointer(`.`)},
+			body:            Body{JSON: new(`.`)},
 			wantBody:        `{"name":["quote\"line\nbreak"],"tag":["a","b"]}`,
 			wantContentType: "application/json",
 		},
 		"text": {
-			body:            Body{Text: queryPointer(`"name=\(.name[0]);tags=\(.tag | join(","))"`)},
+			body:            Body{Text: new(`"name=\(.name[0]);tags=\(.tag | join(","))"`)},
 			wantBody:        "name=quote\"line\nbreak;tags=a,b",
 			wantContentType: "text/plain; charset=utf-8",
 		},
 		"text excludes exporter parameters": {
-			body:            Body{Text: queryPointer(`"keys=\(keys | join(","))"`)},
+			body:            Body{Text: new(`"keys=\(keys | join(","))"`)},
 			wantBody:        "keys=name,tag",
 			wantContentType: "text/plain; charset=utf-8",
 		},
 		"empty text": {
-			body:            Body{Text: queryPointer(`""`)},
+			body:            Body{Text: new(`""`)},
 			wantContentType: "text/plain; charset=utf-8",
 		},
 		"content type override": {
-			body:            Body{Text: queryPointer(`"name=\(.name[0])"`)},
+			body:            Body{Text: new(`"name=\(.name[0])"`)},
 			headers:         map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
 			wantBody:        "name=quote\"line\nbreak",
 			wantContentType: "application/x-www-form-urlencoded",
@@ -613,10 +566,10 @@ func TestProbeBody(t *testing.T) {
 
 func TestProbeRejectsInvalidBodyResults(t *testing.T) {
 	tests := map[string]Body{
-		"evaluation error": {JSON: queryPointer(`error("failed")`)},
-		"no values":        {JSON: queryPointer(`empty`)},
-		"multiple values":  {JSON: queryPointer(`1, 2`)},
-		"non-string text":  {Text: queryPointer(`1`)},
+		"evaluation error": {JSON: new(`error("failed")`)},
+		"no values":        {JSON: new(`empty`)},
+		"multiple values":  {JSON: new(`1, 2`)},
+		"non-string text":  {Text: new(`1`)},
 	}
 
 	for name, body := range tests {
@@ -667,16 +620,7 @@ func TestProbeMetricGenerationPartialFailure(t *testing.T) {
 				Value:     ".value",
 			}},
 			wantStatus: http.StatusOK,
-			wantBody: trim(`
-item_value{id="a"} 1
-item_value{id="c"} 3
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 1
-probe_metrics_successful 2
-probe_success 0
-probe_timestamp_errors 0
-`),
+			wantBody:   "item_value{id=\"a\"} 1\nitem_value{id=\"c\"} 3\n" + probeStatus(0, 0, 1, 2, 0, 0),
 		},
 		"all values fail": {
 			body: `{"items":[{"value":"invalid"}]}`,
@@ -1093,7 +1037,7 @@ func TestLoadConfigBody(t *testing.T) {
 func TestCompileConfigCompilesAndReusesQueries(t *testing.T) {
 	cfg := &Config{Modules: map[string]Module{
 		"test": {
-			Body: Body{JSON: queryPointer(".value")},
+			Body: Body{JSON: new(".value")},
 			Metrics: []Metric{{
 				Query:          ".value",
 				Name:           ".value",
@@ -1126,23 +1070,23 @@ func TestCompileConfigRejectsInvalidBodies(t *testing.T) {
 		part string
 	}{
 		"json and text": {
-			body: Body{JSON: queryPointer("."), Text: queryPointer(".")},
+			body: Body{JSON: new("."), Text: new(".")},
 			part: "mutually exclusive",
 		},
 		"empty json": {
-			body: Body{JSON: queryPointer("")},
+			body: Body{JSON: new("")},
 			part: "json query is empty",
 		},
 		"empty text": {
-			body: Body{Text: queryPointer("")},
+			body: Body{Text: new("")},
 			part: "text query is empty",
 		},
 		"json parse error": {
-			body: Body{JSON: queryPointer("(")},
+			body: Body{JSON: new("(")},
 			part: "json",
 		},
 		"text compile error": {
-			body: Body{Text: queryPointer("unknown_function")},
+			body: Body{Text: new("unknown_function")},
 			part: "text",
 		},
 	}
@@ -1396,13 +1340,7 @@ func TestProbeEpochTimestampPerValue(t *testing.T) {
 	result := testReq(http.MethodGet, query, nil, handleProbe(mustCompileConfig(t, cfg), http.DefaultClient, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
-	assert(t, trim(`
-probe_body_errors 0
-probe_fetch_errors 0
-probe_metrics_failed 0
-probe_metrics_successful 3
-probe_success 1
-probe_timestamp_errors 0
+	assert(t, probeStatus(0, 0, 0, 3, 1, 0)+trim(`
 probe_value{id="a"} 1 1712345678901
 probe_value{id="b"} 2 1712345678902
 probe_value{id="c"} 3
@@ -1618,10 +1556,6 @@ func mustCompileConfig(t *testing.T, cfg *Config) *Config {
 		t.Fatal(err)
 	}
 	return cfg
-}
-
-func queryPointer(query Query) *Query {
-	return &query
 }
 
 func mustCompileMetric(t *testing.T, metric Metric) Metric {
