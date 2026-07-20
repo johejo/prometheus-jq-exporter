@@ -622,6 +622,18 @@ func TestProbeMetricGenerationPartialFailure(t *testing.T) {
 			wantStatus: http.StatusOK,
 			wantBody:   "item_value{id=\"a\"} 1\nitem_value{id=\"c\"} 3\n" + probeStatus(0, 0, 1, 2, 0, 0),
 		},
+		"duplicate name and labels": {
+			body: `{"items":[{"id":"a","value":1},{"id":"a","value":2}]}`,
+			metrics: []Metric{{
+				Name:      "item_value",
+				Query:     ".items",
+				Labels:    map[string]Query{"id": ".id"},
+				ValueType: valueTypeGauge,
+				Value:     ".value",
+			}},
+			wantStatus: http.StatusOK,
+			wantBody:   "item_value{id=\"a\"} 1\n" + probeStatus(0, 0, 1, 1, 0, 0),
+		},
 		"all values fail": {
 			body: `{"items":[{"value":"invalid"}]}`,
 			metrics: []Metric{{

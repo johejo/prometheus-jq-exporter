@@ -764,6 +764,9 @@ func makeMetrics(ctx context.Context, metricSet *probeMetricSet, value any, m Me
 	if err := metricSet.registerFamily(metricFamily, m.ValueType); err != nil {
 		return err
 	}
+	if _, exists := metricSet.metrics[metricName]; exists {
+		return fmt.Errorf("duplicate metric %q", metricName)
+	}
 	metricSet.metrics[metricName] = probeMetric
 	metricSet.metricsSuccessful++
 	return nil
