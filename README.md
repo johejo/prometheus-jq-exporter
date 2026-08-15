@@ -39,8 +39,12 @@ Usage of prometheus-jq-exporter:
         HTTP server request header read timeout (default 5s)
   -target-timeout duration
         target request timeout (default 30s)
+  -version
+        print version and exit
 
 ```
+
+The version is taken from Go build information by default. It can be overridden at build time with `go build -ldflags '-X main.version=v1.2.3'`.
 
 Target responses are limited to 10 MiB by default, and the complete target request—including reading its response body—must finish within 30 seconds. Incoming request headers must be received within 5 seconds. Use the corresponding flags to tune these limits; all values must be positive.
 

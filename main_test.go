@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,43 @@ import (
 
 	"github.com/VictoriaMetrics/metrics"
 )
+
+func TestResolveVersion(t *testing.T) {
+	tests := map[string]struct {
+		linkedVersion string
+		buildInfo     *debug.BuildInfo
+		buildInfoOK   bool
+		want          string
+	}{
+		"ldflags version": {
+			linkedVersion: "v1.2.3",
+			buildInfo:     &debug.BuildInfo{Main: debug.Module{Version: "v9.9.9"}},
+			buildInfoOK:   true,
+			want:          "v1.2.3",
+		},
+		"build info version": {
+			buildInfo:   &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}},
+			buildInfoOK: true,
+			want:        "v1.2.3",
+		},
+		"missing build info": {
+			want: "unknown",
+		},
+		"empty build info version": {
+			buildInfo:   &debug.BuildInfo{},
+			buildInfoOK: true,
+			want:        "unknown",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			readBuildInfo := func() (*debug.BuildInfo, bool) {
+				return test.buildInfo, test.buildInfoOK
+			}
+			assert(t, test.want, resolveVersion(test.linkedVersion, readBuildInfo))
+		})
+	}
+}
 
 func TestHTTPResourceLimits(t *testing.T) {
 	assert(t, defaultMaxResponseBodySize, *maxResponseBodySize)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ var (
 	maxResponseBodySize       = flag.Int64("max-response-body-size", defaultMaxResponseBodySize, "maximum target response body size in bytes")
 	targetTimeout             = flag.Duration("target-timeout", defaultTargetTimeout, "target request timeout")
 	readHeaderTimeout         = flag.Duration("read-header-timeout", defaultReadHeaderTimeout, "HTTP server request header read timeout")
+	showVersion               = flag.Bool("version", false, "print version and exit")
+	version                   string
 )
 
 const (
@@ -54,6 +57,10 @@ var reservedProbeMetrics = map[string]struct{}{
 
 func main() {
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(resolveVersion(version, debug.ReadBuildInfo))
+		return
+	}
 
 	initLogger(*loglevel)
 
@@ -70,6 +77,16 @@ func main() {
 	slog.Info("listening", "addr", *addr)
 	server := newHTTPServer(*addr, handler, *readHeaderTimeout)
 	log.Fatal(server.ListenAndServe())
+}
+
+func resolveVersion(linkedVersion string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
+	if linkedVersion != "" {
+		return linkedVersion
+	}
+	if buildInfo, ok := readBuildInfo(); ok && buildInfo.Main.Version != "" {
+		return buildInfo.Main.Version
+	}
+	return "unknown"
 }
 
 func validateHTTPLimits(maxResponseBodySize int64, targetTimeout, readHeaderTimeout time.Duration) error {
