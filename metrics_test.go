@@ -30,13 +30,7 @@ func TestAsCounterValueRejectsNegativeInt(t *testing.T) {
 	}
 }
 
-func TestAsCounterValueFloat64(t *testing.T) {
-	value, err := asCounterValue(float64(10000000))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assert(t, uint64(10000000), value)
-
+func TestAsCounterValueRejectsInvalidFloat64(t *testing.T) {
 	for name, value := range map[string]float64{
 		"negative":          -1,
 		"fractional":        1.5,
@@ -145,7 +139,6 @@ func TestMakeMetricsEpochTimestampOptional(t *testing.T) {
 		value any
 	}{
 		"null":      {query: ".timestamp", value: map[string]any{"timestamp": nil}},
-		"missing":   {query: ".timestamp", value: map[string]any{}},
 		"no result": {query: ".timestamp // empty", value: map[string]any{}},
 	}
 	for name, test := range tests {

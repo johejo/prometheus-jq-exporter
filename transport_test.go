@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,15 +22,14 @@ func TestProbeTargetTimeout(t *testing.T) {
 	})
 
 	cfg := mustCompileConfig(t, &Config{Modules: map[string]Module{"test": {}}})
-	result := testReq(http.MethodGet, "/probe?module=test&target=http://example.test", nil, handleProbe(cfg, client, defaultMaxResponseBodySize))
+	result := testReq(http.MethodGet, "/probe?module=test&debug=true&target=http://example.test", nil, handleProbe(cfg, client, defaultMaxResponseBodySize))
 	assert(t, http.StatusOK, result.StatusCode)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
-	assert(t, probeStatus(0, 1, 0, 0, 0, 0), body)
-
-	req := must[*http.Request](t)(http.NewRequest(http.MethodGet, "http://example.test", nil))
-	_, err := client.Do(req)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected deadline exceeded, got %v", err)
+	if !strings.Contains(body, "context deadline exceeded") {
+		t.Fatalf("debug response does not contain timeout error: %q", body)
+	}
+	if !strings.HasSuffix(body, probeStatus(0, 1, 0, 0, 0, 0)) {
+		t.Fatalf("timeout was not recorded as a fetch error: %q", body)
 	}
 }
 

@@ -11,81 +11,47 @@ import (
 	"github.com/itchyny/gojq"
 )
 
-func TestLoadConfigValidStatusCodes(t *testing.T) {
-	tests := map[string]string{
-		"yaml": "modules:\n  test:\n    valid_status_codes: [200, 404]\n",
-		"json": `{"modules":{"test":{"valid_status_codes":[200,404]}}}`,
+func TestLoadConfig(t *testing.T) {
+	tests := map[string]struct {
+		content    string
+		bodyFormat bodyFormat
+	}{
+		"yaml": {
+			content: `modules:
+  test:
+    valid_status_codes: [200, 404]
+    body:
+      json: '{value: .value[0]}'
+    metrics:
+      - name: test_metric
+        value: 1
+        epochTimestamp: .timestamp
+`,
+			bodyFormat: bodyFormatJSON,
+		},
+		"json": {
+			content:    `{"modules":{"test":{"valid_status_codes":[200,404],"body":{"text":"\"value=\\(.value[0])\""},"metrics":[{"name":"test_metric","value":"1","epochTimestamp":".timestamp"}]}}}`,
+			bodyFormat: bodyFormatText,
+		},
 	}
 
-	for extension, content := range tests {
+	for extension, test := range tests {
 		t.Run(extension, func(t *testing.T) {
 			configPath := filepath.Join(t.TempDir(), "config."+extension)
-			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+			if err := os.WriteFile(configPath, []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			cfg := must[*Config](t)(loadConfig(configPath, false))
-			assert(t, []int{http.StatusOK, http.StatusNotFound}, cfg.Modules["test"].ValidStatusCodes)
-		})
-	}
-}
+			module := cfg.Modules["test"]
+			assert(t, []int{http.StatusOK, http.StatusNotFound}, module.ValidStatusCodes)
+			assert(t, valueTypeUntyped, module.Metrics[0].ValueType)
+			assert(t, Query(".timestamp"), module.Metrics[0].EpochTimestamp)
 
-func TestLoadConfigDefaultsValueTypeToUntyped(t *testing.T) {
-	tests := map[string]string{
-		"yaml": "modules:\n  test:\n    metrics:\n      - name: test_metric\n        value: 1\n",
-		"json": `{"modules":{"test":{"metrics":[{"name":"test_metric","value":"1"}]}}}`,
-	}
-
-	for extension, content := range tests {
-		t.Run(extension, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config."+extension)
-			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg := must[*Config](t)(loadConfig(configPath, false))
-			assert(t, valueTypeUntyped, cfg.Modules["test"].Metrics[0].ValueType)
-		})
-	}
-}
-
-func TestLoadConfigEpochTimestamp(t *testing.T) {
-	tests := map[string]string{
-		"yaml": "modules:\n  test:\n    metrics:\n      - name: test_metric\n        value: 1\n        epochTimestamp: .timestamp\n",
-		"json": `{"modules":{"test":{"metrics":[{"name":"test_metric","value":"1","epochTimestamp":".timestamp"}]}}}`,
-	}
-
-	for extension, content := range tests {
-		t.Run(extension, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config."+extension)
-			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg := must[*Config](t)(loadConfig(configPath, false))
-			assert(t, Query(".timestamp"), cfg.Modules["test"].Metrics[0].EpochTimestamp)
-		})
-	}
-}
-
-func TestLoadConfigBody(t *testing.T) {
-	tests := map[string]string{
-		"yaml": "modules:\n  test:\n    body:\n      json: '{value: .value[0]}'\n",
-		"json": `{"modules":{"test":{"body":{"text":"\"value=\\(.value[0])\""}}}}`,
-	}
-
-	for extension, content := range tests {
-		t.Run(extension, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config."+extension)
-			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			body := must[*Config](t)(loadConfig(configPath, false)).Modules["test"].Body
+			body := module.Body
 			if body.query == nil {
 				t.Fatal("body query was not compiled")
 			}
-			wantFormat := bodyFormatJSON
-			if extension == "json" {
-				wantFormat = bodyFormatText
-			}
-			assert(t, wantFormat, body.format)
+			assert(t, test.bodyFormat, body.format)
 		})
 	}
 }

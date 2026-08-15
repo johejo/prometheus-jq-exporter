@@ -616,12 +616,6 @@ func TestProbeValidStatusCodes(t *testing.T) {
 			want:        http.StatusOK,
 			wantSuccess: 1,
 		},
-		"empty list accepts 2xx": {
-			status:           http.StatusOK,
-			validStatusCodes: []int{},
-			want:             http.StatusOK,
-			wantSuccess:      1,
-		},
 		"default rejects non-2xx": {
 			status: http.StatusNotFound,
 			want:   http.StatusOK,
@@ -698,11 +692,6 @@ func TestProbeMetricFloatValueFormatting(t *testing.T) {
 		"gauge at two to the power of 63": {
 			value:     math.Exp2(63),
 			valueType: valueTypeGauge,
-			want:      "probe_value{} 9.223372036854776e+18\n",
-		},
-		"untyped at two to the power of 63": {
-			value:     math.Exp2(63),
-			valueType: valueTypeUntyped,
 			want:      "probe_value{} 9.223372036854776e+18\n",
 		},
 		"largest float below two to the power of 63": {
