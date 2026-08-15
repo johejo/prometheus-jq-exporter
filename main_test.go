@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -71,6 +74,35 @@ func TestHTTPResourceLimits(t *testing.T) {
 		t.Fatal("HTTP server handler is nil")
 	}
 	assert(t, serverTimeout, server.ReadHeaderTimeout)
+}
+
+func TestLogFormat(t *testing.T) {
+	assert(t, "text", *logFormat)
+
+	t.Run("text", func(t *testing.T) {
+		var output bytes.Buffer
+		logger := slog.New(newLogHandler(&output, "info", "text"))
+		logger.Info("test message", "key", "value")
+
+		got := output.String()
+		if !strings.Contains(got, "level=INFO") || !strings.Contains(got, `msg="test message"`) || !strings.Contains(got, "key=value") {
+			t.Fatalf("unexpected text log: %s", got)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		var output bytes.Buffer
+		logger := slog.New(newLogHandler(&output, "info", "json"))
+		logger.Info("test message", "key", "value")
+
+		var got map[string]any
+		if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+			t.Fatalf("invalid JSON log: %v", err)
+		}
+		assert(t, "INFO", got["level"])
+		assert(t, "test message", got["msg"])
+		assert(t, "value", got["key"])
+	})
 }
 
 func TestValidateHTTPLimits(t *testing.T) {

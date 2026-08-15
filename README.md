@@ -31,6 +31,8 @@ Usage of prometheus-jq-exporter:
         expand environment variable in config file
   -expose-metadata
         expose metric metadata (default true)
+  -log-format string
+        log format (text or json) (default "text")
   -log-level string
         log level (default "info")
   -max-response-body-size int

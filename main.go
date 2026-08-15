@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -20,6 +21,7 @@ var (
 	config                    = flag.String("config", "config.yaml", "config file path")
 	expandEnv                 = flag.Bool("expand-env", false, "expand environment variable in config file")
 	loglevel                  = flag.String("log-level", "info", "log level")
+	logFormat                 = flag.String("log-format", "text", "log format (text or json)")
 	exposeMetadata            = flag.Bool("expose-metadata", true, "expose metric metadata")
 	enableFileTransport       = flag.Bool("enable-file-transport", false, "enable file transport")
 	enableUnixSocketTransport = flag.Bool("enable-unix-socket-transport", false, "enable unix socket transport")
@@ -62,7 +64,7 @@ func main() {
 		return
 	}
 
-	initLogger(*loglevel)
+	initLogger(*loglevel, *logFormat)
 
 	if err := validateHTTPLimits(*maxResponseBodySize, *targetTimeout, *readHeaderTimeout); err != nil {
 		log.Fatal(err)
@@ -123,7 +125,11 @@ func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.
 	return mux, nil
 }
 
-func initLogger(loglevel string) {
+func initLogger(loglevel, logFormat string) {
+	slog.SetDefault(slog.New(newLogHandler(os.Stderr, loglevel, logFormat)))
+}
+
+func newLogHandler(w io.Writer, loglevel, logFormat string) slog.Handler {
 	slogLevel := slog.LevelInfo
 	switch strings.ToLower(loglevel) {
 	case "debug":
@@ -136,7 +142,7 @@ func initLogger(loglevel string) {
 		slogLevel = slog.LevelError
 	}
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	options := &slog.HandlerOptions{
 		AddSource: true,
 		Level:     slogLevel,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
@@ -145,6 +151,10 @@ func initLogger(loglevel string) {
 				source.File = filepath.Base(source.File)
 			}
 			return a
-		}},
-	)))
+		},
+	}
+	if strings.EqualFold(logFormat, "json") {
+		return slog.NewJSONHandler(w, options)
+	}
+	return slog.NewTextHandler(w, options)
 }
