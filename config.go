@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 
 	"github.com/goccy/go-yaml"
@@ -22,17 +20,7 @@ func loadConfig(config string, expandEnv bool) (*Config, error) {
 	}
 
 	var cfg Config
-	var unmarshal func(b []byte, dst any) error
-	switch filepath.Ext(config) {
-	case ".json":
-		unmarshal = json.Unmarshal
-	case ".yaml", ".yml":
-		unmarshal = yaml.Unmarshal
-	default:
-		return nil, fmt.Errorf("unsupported file %s", config)
-	}
-
-	if err := unmarshal(b, &cfg); err != nil {
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return nil, err
 	}
 	if err := compileConfig(&cfg); err != nil {

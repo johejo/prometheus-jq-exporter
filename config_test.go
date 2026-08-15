@@ -13,10 +13,12 @@ import (
 
 func TestLoadConfig(t *testing.T) {
 	tests := map[string]struct {
+		fileName   string
 		content    string
 		bodyFormat bodyFormat
 	}{
 		"yaml": {
+			fileName: "config",
 			content: `modules:
   test:
     valid_status_codes: [200, 404]
@@ -30,14 +32,15 @@ func TestLoadConfig(t *testing.T) {
 			bodyFormat: bodyFormatJSON,
 		},
 		"json": {
+			fileName:   "config.conf",
 			content:    `{"modules":{"test":{"valid_status_codes":[200,404],"body":{"text":"\"value=\\(.value[0])\""},"metrics":[{"name":"test_metric","value":"1","epochTimestamp":".timestamp"}]}}}`,
 			bodyFormat: bodyFormatText,
 		},
 	}
 
-	for extension, test := range tests {
-		t.Run(extension, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config."+extension)
+	for format, test := range tests {
+		t.Run(format, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), test.fileName)
 			if err := os.WriteFile(configPath, []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
