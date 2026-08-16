@@ -40,6 +40,7 @@ const (
 	valueTypeCounter             = "counter"
 	valueTypeGauge               = "gauge"
 	valueTypeUntyped             = "untyped"
+	buildInfoMetric              = "jq_exporter_build_info"
 	probeBodyErrorsMetric        = "probe_body_errors"
 	probeFetchErrorsMetric       = "probe_fetch_errors"
 	probeMetricsFailedMetric     = "probe_metrics_failed"
@@ -120,7 +121,7 @@ func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.
 
 	metrics.ExposeMetadata(exposeMetadata)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /metrics", handleMetrics)
+	mux.HandleFunc("GET /metrics", handleMetrics(newBuildInfoMetricSet(resolveVersion(version, debug.ReadBuildInfo))))
 	mux.HandleFunc("GET /probe", handleProbe(cfg, httpClient, maxResponseBodySize))
 	return mux, nil
 }

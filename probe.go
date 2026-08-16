@@ -106,8 +106,17 @@ func makeBody(ctx context.Context, params map[string][]string, body Body) (io.Re
 	}
 }
 
-func handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics.WriteProcessMetrics(w)
+func newBuildInfoMetricSet(version string) *metrics.Set {
+	metricSet := metrics.NewSet()
+	metricSet.NewGauge(buildInfoMetric+`{version="`+escapeLabelValue(version)+`"}`, func() float64 { return 1 })
+	return metricSet
+}
+
+func handleMetrics(buildInfoMetrics *metrics.Set) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		buildInfoMetrics.WritePrometheus(w)
+		metrics.WriteProcessMetrics(w)
+	}
 }
 
 func handleProbe(cfg *Config, httpClient *http.Client, maxResponseBodySize int64) http.HandlerFunc {

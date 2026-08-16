@@ -57,6 +57,28 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
+func TestBuildInfoMetric(t *testing.T) {
+	originalVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = originalVersion })
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("modules: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := must[http.Handler](t)(newHandler(configPath, false, false, http.DefaultClient, defaultMaxResponseBodySize))
+	result := testReq(http.MethodGet, "/metrics", nil, handler)
+	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
+
+	var buildInfoSamples []string
+	for line := range strings.Lines(body) {
+		if strings.HasPrefix(line, buildInfoMetric) {
+			buildInfoSamples = append(buildInfoSamples, strings.TrimSuffix(line, "\n"))
+		}
+	}
+	assert(t, []string{`jq_exporter_build_info{version="v1.2.3"} 1`}, buildInfoSamples)
+}
+
 func TestHTTPResourceLimits(t *testing.T) {
 	assert(t, defaultMaxResponseBodySize, *maxResponseBodySize)
 	assert(t, defaultTargetTimeout, *targetTimeout)
