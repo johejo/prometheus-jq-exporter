@@ -1,4 +1,4 @@
-package main
+package exporter
 
 import (
 	"context"
@@ -12,10 +12,14 @@ import (
 )
 
 func newHTTPClient(enableFileTransport, enableUnixSocketTransport bool, timeout time.Duration) *http.Client {
+	return newHTTPClientWithFileRoot(enableFileTransport, enableUnixSocketTransport, ".", timeout)
+}
+
+func newHTTPClientWithFileRoot(enableFileTransport, enableUnixSocketTransport bool, fileRoot string, timeout time.Duration) *http.Client {
 	defaultTransport := http.DefaultTransport.(*http.Transport).Clone()
 
 	if enableFileTransport {
-		fileTransport := http.NewFileTransport(http.Dir("."))
+		fileTransport := http.NewFileTransport(http.Dir(fileRoot))
 		defaultTransport.RegisterProtocol("file", RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if r.URL.Host != "." {
 				r.URL.Path = path.Join(r.URL.Host, r.URL.Path)

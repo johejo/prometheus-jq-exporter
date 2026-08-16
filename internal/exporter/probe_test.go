@@ -1,4 +1,4 @@
-package main
+package exporter
 
 import (
 	"fmt"
@@ -66,9 +66,9 @@ func TestProbeResponseBodyLimit(t *testing.T) {
 }
 
 func Test(t *testing.T) {
-	httpClient := newHTTPClient(true, true, defaultTargetTimeout)
+	httpClient := newHTTPClientWithFileRoot(true, true, "../..", defaultTargetTimeout)
 
-	cfg, err := loadConfig("./testdata/config.yaml", false)
+	cfg, err := loadConfig("../../testdata/config.yaml", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 	})
 
 	t.Run("http", func(t *testing.T) {
-		ts := httptest.NewServer(http.FileServer(http.Dir("./testdata")))
+		ts := httptest.NewServer(http.FileServer(http.Dir("../../testdata")))
 		t.Cleanup(ts.Close)
 
 		target := fmt.Sprintf("/probe?module=tailscale&target=%s/tailscale-status.json", ts.URL)
@@ -102,7 +102,7 @@ tailscale_status_peer_tx_bytes{machine_name="testhostname2"} 0
 
 	t.Run("unix", func(t *testing.T) {
 		testSock := filepath.Join(t.TempDir(), "test.sock")
-		ts := httptest.NewUnstartedServer(http.FileServer(http.Dir("./testdata")))
+		ts := httptest.NewUnstartedServer(http.FileServer(http.Dir("../../testdata")))
 		ts.Listener = must[net.Listener](t)(net.Listen("unix", testSock))
 		ts.Start()
 		t.Cleanup(ts.Close)

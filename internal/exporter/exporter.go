@@ -1,10 +1,9 @@
-package main
+package exporter
 
 import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,7 +28,6 @@ var (
 	targetTimeout             = flag.Duration("target-timeout", defaultTargetTimeout, "target request timeout")
 	readHeaderTimeout         = flag.Duration("read-header-timeout", defaultReadHeaderTimeout, "HTTP server request header read timeout")
 	showVersion               = flag.Bool("version", false, "print version and exit")
-	version                   string
 )
 
 const (
@@ -58,28 +56,29 @@ var reservedProbeMetrics = map[string]struct{}{
 	probeTimestampErrorsMetric:   {},
 }
 
-func main() {
+// Run starts the exporter using the process command-line flags.
+func Run(linkedVersion string) error {
 	flag.Parse()
 	if *showVersion {
-		fmt.Println(resolveVersion(version, debug.ReadBuildInfo))
-		return
+		fmt.Println(resolveVersion(linkedVersion, debug.ReadBuildInfo))
+		return nil
 	}
 
 	initLogger(*loglevel, *logFormat)
 
 	if err := validateHTTPLimits(*maxResponseBodySize, *targetTimeout, *readHeaderTimeout); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	httpClient := newHTTPClient(*enableFileTransport, *enableUnixSocketTransport, *targetTimeout)
-	handler, err := newHandler(*config, *expandEnv, *exposeMetadata, httpClient, *maxResponseBodySize)
+	handler, err := newHandler(*config, *expandEnv, *exposeMetadata, httpClient, *maxResponseBodySize, linkedVersion)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	slog.Info("listening", "addr", *addr)
 	server := newHTTPServer(*addr, handler, *readHeaderTimeout)
-	log.Fatal(server.ListenAndServe())
+	return server.ListenAndServe()
 }
 
 func resolveVersion(linkedVersion string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
@@ -113,7 +112,7 @@ func newHTTPServer(addr string, handler http.Handler, readHeaderTimeout time.Dur
 	}
 }
 
-func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.Client, maxResponseBodySize int64) (http.Handler, error) {
+func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.Client, maxResponseBodySize int64, linkedVersion string) (http.Handler, error) {
 	cfg, err := loadConfig(config, expandEnv)
 	if err != nil {
 		return nil, err
@@ -121,7 +120,7 @@ func newHandler(config string, expandEnv, exposeMetadata bool, httpClient *http.
 
 	metrics.ExposeMetadata(exposeMetadata)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /metrics", handleMetrics(newBuildInfoMetricSet(resolveVersion(version, debug.ReadBuildInfo))))
+	mux.HandleFunc("GET /metrics", handleMetrics(newBuildInfoMetricSet(resolveVersion(linkedVersion, debug.ReadBuildInfo))))
 	mux.HandleFunc("GET /probe", handleProbe(cfg, httpClient, maxResponseBodySize))
 	return mux, nil
 }

@@ -1,4 +1,4 @@
-package main
+package exporter
 
 import (
 	"bytes"
@@ -58,15 +58,11 @@ func TestResolveVersion(t *testing.T) {
 }
 
 func TestBuildInfoMetric(t *testing.T) {
-	originalVersion := version
-	version = "v1.2.3"
-	t.Cleanup(func() { version = originalVersion })
-
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("modules: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := must[http.Handler](t)(newHandler(configPath, false, false, http.DefaultClient, defaultMaxResponseBodySize))
+	handler := must[http.Handler](t)(newHandler(configPath, false, false, http.DefaultClient, defaultMaxResponseBodySize, "v1.2.3"))
 	result := testReq(http.MethodGet, "/metrics", nil, handler)
 	body := string(must[[]byte](t)(io.ReadAll(result.Body)))
 
@@ -188,7 +184,7 @@ func TestProductionFlagsExpandEnvAndDefaultMetadata(t *testing.T) {
 	t.Cleanup(target.Close)
 	t.Cleanup(func() { metrics.ExposeMetadata(false) })
 
-	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata, http.DefaultClient, defaultMaxResponseBodySize))
+	handler := must[http.Handler](t)(newHandler(*config, *expandEnv, *exposeMetadata, http.DefaultClient, defaultMaxResponseBodySize, ""))
 	query := "/probe?module=test&target=" + url.QueryEscape(target.URL)
 	result := testReq(http.MethodGet, query, nil, handler)
 	assert(t, http.StatusOK, result.StatusCode)
